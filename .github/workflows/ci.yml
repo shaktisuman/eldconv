@@ -1,0 +1,97 @@
+# Lint, unit and end-to-end tests on every code change.
+#
+# The end-to-end tests build the fixtures through a stand-in ld.eld that forwards to the system ld,
+# so this runs in minutes and needs no eld. nightly.yml repeats the suite against a real eld.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["docs/**", "**.md", "LICENSE"]
+  pull_request:
+    paths-ignore: ["docs/**", "**.md", "LICENSE"]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  # when called from nightly.yml, github.workflow is the caller's name, so the groups stay distinct
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash   # -eo pipefail
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+
+  test:
+    name: test (python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install build systems the end-to-end tests drive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build meson autoconf automake libtool lld
+          # gn is optional (tests skip without it); not every image has the package
+          sudo apt-get install -y --no-install-recommends generate-ninja || echo "::notice::gn not available"
+      - run: pip install -e '.[test]'
+      - name: pytest
+        run: pytest -ra
+
+  package:
+    # the installed wheel must carry its data files and work from the command line
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          pip install build
+          python -m build
+      - name: Install the wheel into a clean venv
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install dist/*.whl
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+      - name: CLI smoke test
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -x
+          eldconv --version
+          python -c "from eldconv import surface; assert surface.bundled() is not None, 'bundled eld surface missing from wheel'"
+          eldconv detect "$GITHUB_WORKSPACE/tests/fixtures/cmake_lld"
+          eldconv flags "-Wl,--icf=all -Wl,-z,now -Wl,--gc-sections" --source-linker lld
+      - name: Convert and check the gcc fixtures through a stand-in ld.eld
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir fake-eld
+          printf '#!/bin/sh\nexec ld "$@"\n' > fake-eld/ld.eld
+          chmod +x fake-eld/ld.eld
+          for fx in make_gold cmake_bfd_gcc; do   # the others pin clang
+            echo "::group::$fx"
+            eldconv convert "$GITHUB_WORKSPACE/tests/fixtures/$fx" "out/$fx" --eld "$PWD/fake-eld/ld.eld" --check
+            echo "::endgroup::"
+          done
