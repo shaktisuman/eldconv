@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eldconv"
+version = "1.1.0"
+description = "Convert bfd/lld/gold/mold CMake/Make build setups to link with Qualcomm eld"
+requires-python = ">=3.8"
+readme = "README.md"
+keywords = ["linker", "eld", "lld", "gold", "mold", "cmake", "build"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Build Tools",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/shaktisuman/eldconv"
+Issues = "https://github.com/shaktisuman/eldconv/issues"
+Changelog = "https://github.com/shaktisuman/eldconv/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+dev = ["pytest>=7", "ruff"]
+
+[project.scripts]
+eldconv = "eldconv.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["eldconv*"]
+
+[tool.setuptools.package-data]
+eldconv = ["data/*.json"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py38"
+
+[tool.ruff.lint]
+# correctness only: syntax errors, undefined names, unused imports/variables
+select = ["E9", "F"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F841"]
