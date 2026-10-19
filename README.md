@@ -25,7 +25,7 @@ The source tree is never modified. Everything is written to a new directory.
 
 ## Install
 
-Python 3.8+, no runtime dependencies.
+Python 3.12+, no runtime dependencies.
 
 ```sh
 git clone https://github.com/shaktisuman/eldconv
@@ -172,4 +172,4 @@ python -m ruff check eldconv tests tools
 `tools/harvest_source_options.py` regenerates `eldconv/data/source_options.json`;
 `eldconv surface` regenerates `eldconv/data/eld-surface.json`.
 
-CI (`.github/workflows/ci.yml`) runs lint and tests on Python 3.8–3.13 and builds the wheel.
+CI (`.github/workflows/ci.yml`) runs lint and tests on Python 3.12 and 3.14 and builds the wheel.

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "eldconv"
 version = "1.1.0"
 description = "Convert bfd/lld/gold/mold CMake/Make build setups to link with Qualcomm eld"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 readme = "README.md"
 keywords = ["linker", "eld", "lld", "gold", "mold", "cmake", "build"]
 classifiers = [
@@ -38,7 +38,7 @@ eldconv = ["data/*.json"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py38"
+target-version = "py312"
 
 [tool.ruff.lint]
 # correctness only: syntax errors, undefined names, unused imports/variables

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Requires Python 3.12 or newer (was 3.8).
+
 ## 1.1.0
 
 Tracks eld `main` as of 13 October 2026.
