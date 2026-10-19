@@ -475,15 +475,6 @@ def unknown_flags(inv: LinkInvocation, known: Set[str]) -> List[str]:
     return sorted({n for n in inv.option_names() if n not in known and n not in _ALWAYS_KNOWN})
 
 
-def _is_under(p: Path, root: Path) -> bool:
-    """Path.is_relative_to, which Python 3.8 lacks."""
-    try:
-        p.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
 def detect_output_system(dst: Path, report: Optional[dict] = None) -> str:
     """Which build system an eldconv output uses: from its report, else by markers."""
     dst = Path(dst)
@@ -545,7 +536,7 @@ def build_commands(dst: Path, build_dir: Path, eld: str, jobs: int, extra_cmake:
     system = system or detect_output_system(dst)
     if system == "gn":
         # GN: args.gn goes in the out dir, then `gn gen` regenerates ninja files.
-        out_rel = build_dir.relative_to(dst) if _is_under(build_dir, dst) else build_dir
+        out_rel = build_dir.relative_to(dst) if build_dir.is_relative_to(dst) else build_dir
         cmds: List[List[str]] = []
         if shutil.which("gn"):
             cmds.append(["gn", "gen", str(out_rel), f"--root={dst}"])
