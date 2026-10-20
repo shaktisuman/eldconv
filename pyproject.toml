@@ -46,6 +46,7 @@ select = ["E9", "F"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]   # test_new_eld imports tests.test_checker; bare `pytest` doesn't put the root on sys.path
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["F841"]
