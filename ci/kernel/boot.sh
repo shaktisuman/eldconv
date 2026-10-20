@@ -19,11 +19,13 @@ trap 'rm -rf "$work"' EXIT
 	-o "$work/init" "$here/init.c"
 (cd "$work" && echo init | cpio -o -H newc -R 0:0 --quiet > initramfs.cpio)
 
-# a kernel that cannot power off keeps qemu running until the timeout; the log decides, not the exit code
+# a kernel that cannot power off keeps qemu running until the timeout; the log decides, not the exit code.
+# -nic none: the default NIC wants efi-virtio.rom, which a --no-install-recommends qemu does not ship
 set +e
 timeout "$timeout_s" qemu-system-aarch64 \
 	-machine virt,gic-version=3 -cpu cortex-a57 -smp 1 -m 256 \
 	-nographic -no-reboot \
+	-nic none \
 	-kernel "$image" -initrd "$work/initramfs.cpio" \
 	-append "console=ttyAMA0 earlycon rdinit=/init panic=-1" \
 	> "$log" 2>&1 < /dev/null
