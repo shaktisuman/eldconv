@@ -318,8 +318,9 @@ eldconv check ../proj-eld --eld "$ELD" --timeout 3600          # fail if eld did
 
 Cache `$ELD`; pass `--eld-surface auto` (or regenerate your own `eldconv surface` snapshot) whenever the eld you use changes.
 This repository's own workflows are `.github/workflows/ci.yml` (lint and tests against a stand-in
-eld, on every change) and `.github/workflows/nightly.yml` (builds eld `main` on llvm-project `main`, then
-runs the tests, `eldconv audit`, a surface comparison and the projects of [VALIDATION.md](VALIDATION.md) against it).
+eld, on every change) and `.github/workflows/nightly.yml` (builds eld `main` on llvm-project `main` with clang,
+saves `ld.eld` as an artifact, then converts a Linux kernel with it, checks that the arm64 `Image` links through
+eld and boots it under qemu; the helpers are in `ci/kernel/`).
 
 ## Troubleshooting
 
