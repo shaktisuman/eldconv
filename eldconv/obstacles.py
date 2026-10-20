@@ -145,6 +145,31 @@ def _scan_i386(root: Path, build_files: Optional[List[Path]] = None) -> List[Dia
     return []
 
 
+KASLR_RE = re.compile(r"^config RANDOMIZE_BASE\b", re.M)
+
+
+def _scan_kaslr(root: Path) -> List[Diag]:
+    """An arm64 kernel with KASLR links with eld but cannot boot (see checker.empty_relocation_bounds)."""
+    kconfig = root / "arch" / "arm64" / "Kconfig"
+    if not (root / "Kbuild").exists():
+        return []
+    try:
+        text = kconfig.read_text(errors="replace")
+    except OSError:
+        return []
+    m = KASLR_RE.search(text)
+    if not m:
+        return []
+    return [Diag("warn", "CONFIG_RANDOMIZE_BASE",
+                 "Linux kernel: if you build it for arm64 with KASLR (CONFIG_RANDOMIZE_BASE, on in defconfig), "
+                 "it links but does not boot. eld (main of 20 Oct 2026) sets the linker-script symbols around "
+                 ".rela.dyn (__pi_rela_start/__pi_rela_end) as if the section were empty, so the kernel "
+                 "applies none of its relocations and crashes before printing anything once KASLR moves it. "
+                 "Build with `scripts/config --disable RANDOMIZE_BASE`; CONFIG_RELOCATABLE alone boots. "
+                 "`eldconv check` verifies the linked vmlinux.",
+                 str(kconfig.relative_to(root)), text.count("\n", 0, m.start()) + 1)]
+
+
 def scan(root: Path, build_files: Optional[List[Path]] = None) -> List[Diag]:
     """Scan a source tree for linker-identity gates.
 
@@ -173,5 +198,6 @@ def scan(root: Path, build_files: Optional[List[Path]] = None) -> List[Diag]:
             p, line = hit
             diags.append(Diag("error", check_id, msg, str(p.relative_to(root)), line))
     diags.extend(_scan_i386(root, build_files))
+    diags.extend(_scan_kaslr(root))
     diags.extend(_scan_outside(root))
     return diags
