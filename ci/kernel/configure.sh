@@ -20,6 +20,12 @@ for sym in PRINTK TTY SERIAL_AMBA_PL011 SERIAL_AMBA_PL011_CONSOLE BLK_DEV_INITRD
 		missing=1
 	fi
 done
+for sym in RELOCATABLE RANDOMIZE_BASE; do
+	if grep -qx "CONFIG_$sym=y" .config; then
+		echo "::error::CONFIG_$sym is on; eld cannot link a relocatable arm64 kernel correctly" >&2
+		missing=1
+	fi
+done
 # poweroff only; without it the boot test falls back to a timeout
 grep -qx "CONFIG_ARM_PSCI_FW=y" .config || echo "::warning::no PSCI; qemu will not power off and the boot test waits for its timeout" >&2
 exit "$missing"
