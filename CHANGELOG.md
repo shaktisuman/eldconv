@@ -3,6 +3,11 @@
 ## Unreleased
 
 - Requires Python 3.12 or newer (was 3.8).
+- `check` fails an image whose linker-script symbols around its dynamic relocations
+  (`__pi_rela_start`/`__pi_rela_end` and the like) do not span them. eld leaves them empty, so a
+  self-relocating image applies none of its relocations. For a kernel without
+  `CONFIG_RANDOMIZE_BASE` this is a warning, since it is never moved.
+- arm64 kernel trees get a warning that KASLR (`CONFIG_RANDOMIZE_BASE`) does not boot with eld.
 
 ## 1.1.0
 

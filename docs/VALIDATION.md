@@ -52,6 +52,34 @@ records the linker in its own version string: `GNU ld compatible linker - eld 24
 - eld's plain `--help` is its host (x86_64) driver's. `--pic-veneer` only appears in
   `ld.eld -m aarch64elf --help`, so `check` now reads the help of every emulation the links used.
 
+### Booting it: arm64 KASLR (20 October 2026)
+
+eld `main` (79e4f37, on llvm-project a1c9008, built with clang 18 and
+`-DELD_ENABLE_SYMBOL_VERSIONING=ON`), Linux v6.12, `tinyconfig` plus `ci/kernel/boot.config`,
+`eldconv check`, then booted on `qemu-system-aarch64 -M virt` with `ci/kernel/boot.sh`:
+
+| config | linker | `check` | boot |
+|---|---|---|---|
+| `RELOCATABLE` off | eld | passes | reaches init |
+| `RELOCATABLE=y` | eld | passes, warns | reaches init |
+| `RELOCATABLE=y`, `RANDOMIZE_BASE=y` | eld | fails | hangs with no output |
+| `RELOCATABLE=y`, `RANDOMIZE_BASE=y` | GNU ld 2.46 | — | reaches init, `KASLR enabled` |
+
+The arm64 linker script brackets the relocations the kernel applies to itself:
+`.rela.dyn : { __pi_rela_start = .; *(.rela .rela*) __pi_rela_end = .; }`. eld fills `.rela.dyn`
+with the relocations it generates (4681 `R_AARCH64_RELATIVE`, 0x1b6d8 bytes) but sets both symbols
+to its start address. The kernel then applies none of them. That is harmless while the kernel runs
+where it was linked, and fatal once KASLR moves it. GNU ld's `__pi_rela_end` is the section's end.
+
+- The flags `convert` drops for arm64 are not the cause. `--no-apply-dynamic-relocs` and RELR are
+  both behind `ld-option`. Dropping the first is why the relocatable kernel without KASLR boots:
+  eld writes the final values in place, so nothing needs relocating.
+- `check` now fails an image whose `X_start`/`X_end` pair does not span a non-empty
+  `.rela.dyn`/`.rel.dyn`/`.relr.dyn`, and only warns for a kernel built without
+  `CONFIG_RANDOMIZE_BASE`. `convert` warns about KASLR on every kernel tree that has it.
+- eld's own kernel boot workflow (`linux-kernel-run.yml`) also turns off `RANDOMIZE_BASE` and
+  `RELOCATABLE` for arm64.
+
 
 ### Re-validation with eld `main` of 13 October 2026
 

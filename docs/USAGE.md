@@ -118,9 +118,19 @@ silently builds for the host.
 ```sh
 eldconv convert ~/src/linux ~/src/linux-eld --eld PATH
 eldconv check ~/src/linux-eld --eld PATH --jobs 8 --timeout 3600 \
-    --pre-build "make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig" \
+    --pre-build "make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig &&
+                 ./scripts/config --disable RANDOMIZE_BASE &&
+                 make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig" \
     --build-arg ARCH=arm64 --build-arg CROSS_COMPILE=aarch64-linux-gnu- --build-arg vmlinux
 ```
+
+Turn KASLR (`CONFIG_RANDOMIZE_BASE`, on in arm64 `defconfig`) off: the kernel links, but eld sets the
+linker-script symbols around `.rela.dyn` (`__pi_rela_start`/`__pi_rela_end`) as if the section were
+empty, so the kernel applies none of its relocations and crashes before printing anything once KASLR
+moves it. `CONFIG_RELOCATABLE` without KASLR boots. `convert` warns about this on kernel trees, and
+`check` reads the bounds in the linked `vmlinux`: it fails a KASLR kernel and only warns otherwise.
+The same check fails any other image (a boot loader, say) whose linker script brackets its
+dynamic relocations the same way.
 
 Notes: eld builds before late September 2026 cannot link `-m elf_i386`, so x86 kernels (whose
 real-mode trampoline is i386) fail there. Recent eld links i386, and the vDSO and `realmode.elf` then

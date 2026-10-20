@@ -337,6 +337,99 @@ def unresolved_data_symbols(path: Path) -> List[str]:
         return []
 
 
+_DYNREL_TYPES = (4, 9, 19)   # SHT_RELA, SHT_REL, SHT_RELR
+
+
+@_tolerant(list)
+def empty_relocation_bounds(path: Path) -> List[Tuple[str, str, str, int]]:
+    """(section, start symbol, end symbol, section size) for each non-empty dynamic-relocation
+    section whose linker-script `X_start`/`X_end` symbol pair does not cover it.
+
+    Kernels and boot loaders relocate themselves by walking the range between two symbols the
+    linker script places around their dynamic relocations (`__pi_rela_start`/`__pi_rela_end` in
+    an arm64 kernel, `__rela_dyn_start`/`__rela_dyn_end` in riscv). eld fills such a section with
+    the relocations it generates but sets the end symbol as if the section were empty. The image
+    links, and runs while it is not moved, but applies no relocation once it is: an arm64 kernel
+    with KASLR dies before printing anything.
+    """
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return []
+    if len(data) < 64 or data[:4] != b"\x7fELF" or data[5] not in (1, 2):
+        return []
+    is64, e = data[4] == 2, "<" if data[5] == 1 else ">"
+    try:
+        if is64:
+            shoff, = struct.unpack_from(e + "Q", data, 0x28)
+            shentsize, shnum, shstrndx = struct.unpack_from(e + "HHH", data, 0x3A)
+        else:
+            shoff, = struct.unpack_from(e + "I", data, 0x20)
+            shentsize, shnum, shstrndx = struct.unpack_from(e + "HHH", data, 0x2E)
+        secs = []   # (name, type, flags, addr, offset, size, link, entsize)
+        for i in range(shnum):
+            off = shoff + i * shentsize
+            if is64:
+                name, typ, flags, addr, soff, size, link, _, _, entsize = struct.unpack_from(
+                    e + "IIQQQQIIQQ", data, off)
+            else:
+                name, typ, flags, addr, soff, size, link, _, _, entsize = struct.unpack_from(
+                    e + "IIIIIIIIII", data, off)
+            secs.append((name, typ, flags, addr, soff, size, link, entsize))
+
+        def cstr(base: int, n: int) -> str:
+            return data[base + n:data.find(b"\0", base + n)].decode(errors="replace")
+
+        relocs = {}   # start address -> (section name, size), allocated non-empty REL/RELA/RELR only
+        for name, typ, flags, addr, _, size, _, _ in secs:
+            if typ in _DYNREL_TYPES and flags & 2 and size:
+                relocs[addr] = (cstr(secs[shstrndx][4], name) if shstrndx < len(secs) else "?", size)
+        symtab = [s for s in secs if s[1] == 2]   # SHT_SYMTAB
+        if not relocs or not symtab:
+            return []
+        _, _, _, _, soff, size, link, entsize = symtab[0]
+        esz = entsize or (24 if is64 else 16)
+        stroff = secs[link][4]
+        # only symbols inside a relocation section's [start, end] can be either half of a pair,
+        # so decode just those names (vmlinux has tens of thousands of symbols)
+        spans = [(a, a + s) for a, (_, s) in relocs.items()]
+        values: Dict[str, int] = {}
+        for pos in range(soff + esz, soff + size - esz + 1, esz):
+            if is64:
+                name, _, _, _, value, _ = struct.unpack_from(e + "IBBHQQ", data, pos)
+            else:
+                name, value, _, _, _, _ = struct.unpack_from(e + "IIIBBH", data, pos)
+            if name and any(lo <= value <= hi for lo, hi in spans):
+                values[cstr(stroff, name)] = value
+        bad = []
+        for start, value in sorted(values.items()):
+            if not start.endswith("_start") or value not in relocs:
+                continue
+            end = start[:-len("_start")] + "_end"
+            section, size = relocs[value]
+            if end in values and values[end] != value + size:
+                bad.append((section, start, end, size))
+        return bad
+    except (struct.error, IndexError):
+        return []
+
+
+def kconfig(dst: Path, build_dir: Optional[Path] = None) -> Dict[str, str]:
+    """CONFIG_* values of a configured Linux kernel tree, built in place or with O=; {} otherwise."""
+    if not (dst / "Kbuild").exists():
+        return {}
+    for d in (build_dir, dst):
+        p = d / ".config" if d else None
+        if p is not None and p.is_file():
+            out = {}
+            for line in p.read_text(errors="replace").splitlines():
+                k, sep, v = line.partition("=")
+                if sep and k.startswith("CONFIG_"):
+                    out[k] = v
+            return out
+    return {}
+
+
 # Other linkers' signatures in .comment (eld writes "Linker <ver> (<hash>)").
 OTHER_LINKER_COMMENT_RE = re.compile(r"\bLLD\s+\d|\bmold\s+\d|\bGNU gold\b")
 _SCAN_SKIP_DIRS = {".git", ".hg", ".svn", "eld-bin", "CMakeFiles", "__pycache__", "node_modules",
@@ -813,6 +906,25 @@ def run_check(dst: Path, eld: Optional[str] = None, build_dir: Optional[Path] = 
                        "(a linker limitation -- eld 24.0's x86_64 backend emits no copy relocations -- "
                        "not something the conversion can fix)")
                 (res.warnings if allow_unresolved_data else res.problems).append(msg)
+    kcfg = kconfig(dst, build_dir)
+    for e in res.outputs:
+        if not (e.get("elf") and not e.get("trycompile") and e.get("elf_type") in ("EXEC", "DYN")):
+            continue
+        for section, start, end, size in empty_relocation_bounds(Path(e["output"])):
+            e.setdefault("empty_relocation_bounds", []).append([section, start, end, size])
+            msg = (f"{e['output']}: {section} holds {size} bytes of dynamic relocations, but the linker "
+                   f"script's {start}/{end} do not span them (eld set {end} as if the section were "
+                   "empty), so code that relocates the image itself by walking that range applies "
+                   "none of them")
+            if not kcfg:
+                res.problems.append(msg)
+            elif kcfg.get("CONFIG_RANDOMIZE_BASE") == "y":
+                res.problems.append(msg + ": with CONFIG_RANDOMIZE_BASE (KASLR) this kernel crashes at boot "
+                                    "before printing anything; build it with `scripts/config --disable "
+                                    "RANDOMIZE_BASE` (CONFIG_RELOCATABLE can stay on)")
+            else:
+                res.warnings.append(msg + ": harmless while CONFIG_RANDOMIZE_BASE is off, since the kernel is "
+                                    "then never moved, but it will not boot with KASLR")
     for e in res.outputs:
         if e.get("trycompile"):
             # CMake deletes its try_compile scratch tree; only judge it if it survived
