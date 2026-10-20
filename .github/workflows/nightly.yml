@@ -86,7 +86,7 @@ jobs:
           # libc++ is both what the build links against and what the resulting ld.eld needs at run time
           sudo apt-get install -y --no-install-recommends \
             "clang-$CLANG_VERSION" "lld-$CLANG_VERSION" "libc++-$CLANG_VERSION-dev" "libc++abi-$CLANG_VERSION-dev" \
-            cmake ninja-build ccache python3 build-essential
+            cmake ninja-build ccache python3 build-essential patchelf
           # Debian names the tools clang-N / ld.lld-N; plain clang and ld.lld live here
           echo "/usr/lib/llvm-$CLANG_VERSION/bin" >> "$GITHUB_PATH"
 
@@ -110,10 +110,11 @@ jobs:
 
       - name: Restore ccache
         if: steps.dist.outputs.cache-hit != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .ccache
-          key: ccache-clang${{ env.CLANG_VERSION }}-${{ steps.refs.outputs.llvm }}-${{ steps.refs.outputs.eld }}
+          # the key never matches (it carries the run id); the prefix restores the newest cache
+          key: ccache-clang${{ env.CLANG_VERSION }}-${{ github.run_id }}
           restore-keys: ccache-clang${{ env.CLANG_VERSION }}-
 
       - name: Configure
@@ -145,8 +146,22 @@ jobs:
         run: |
           ninja -C obj ld.eld
           ccache --show-stats
-          mkdir -p eld-dist/bin
+          # ld.eld links eld's own shared libraries (libLW) from the build tree through its RUNPATH.
+          # Take every library it resolves there and point both at ./lib, so the tree is relocatable.
+          mkdir -p eld-dist/bin eld-dist/lib
           cp -L obj/bin/ld.eld eld-dist/bin/ld.eld
+          ldd obj/bin/ld.eld | awk -v t="$PWD/obj/" 'index($3, t) == 1 {print $3}' | xargs -r cp -L -t eld-dist/lib
+          patchelf --set-rpath '$ORIGIN/../lib' eld-dist/bin/ld.eld
+          for lib in eld-dist/lib/*; do patchelf --set-rpath '$ORIGIN' "$lib"; done
+          ls -l eld-dist/lib
+
+      - name: Save ccache
+        # also when the build failed or was cancelled: the next run resumes from what compiled
+        if: always() && steps.dist.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ccache-clang${{ env.CLANG_VERSION }}-${{ github.run_id }}
 
       - name: Smoke-test ld.eld
         run: |
@@ -164,7 +179,7 @@ jobs:
         run: |
           printf 'eld %s\nllvm-project %s\nclang-%s\n' \
             "${{ steps.refs.outputs.eld }}" "${{ steps.refs.outputs.llvm }}" "$CLANG_VERSION" > eld-dist/BUILD-INFO
-          tar -C eld-dist -czf ld.eld.tar.gz bin BUILD-INFO
+          tar -C eld-dist -czf ld.eld.tar.gz bin lib BUILD-INFO
 
       - uses: actions/upload-artifact@v4
         with:
