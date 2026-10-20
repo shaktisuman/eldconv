@@ -1,7 +1,7 @@
 # Lint, unit and end-to-end tests on every code change.
 #
 # The end-to-end tests build the fixtures through a stand-in ld.eld that forwards to the system ld,
-# so this runs in minutes and needs no eld. nightly.yml repeats the suite against a real eld.
+# so this runs in minutes and needs no eld. nightly.yml builds a real eld and boots a kernel linked by it.
 name: ci
 
 on:
@@ -17,7 +17,6 @@ permissions:
   contents: read
 
 concurrency:
-  # when called from nightly.yml, github.workflow is the caller's name, so the groups stay distinct
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
