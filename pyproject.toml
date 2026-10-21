@@ -21,7 +21,6 @@ dependencies = []
 [project.urls]
 Homepage = "https://github.com/shaktisuman/eldconv"
 Issues = "https://github.com/shaktisuman/eldconv/issues"
-Changelog = "https://github.com/shaktisuman/eldconv/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]

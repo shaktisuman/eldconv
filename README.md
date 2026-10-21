@@ -1,5 +1,9 @@
 # eldconv
 
+[![ci](https://github.com/shaktisuman/eldconv/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/shaktisuman/eldconv/actions/workflows/ci.yml?query=branch%3Amain)
+[![tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fshaktisuman%2Feldconv%2Fbadges%2Ftests.json&cacheSeconds=300)](https://github.com/shaktisuman/eldconv/actions/workflows/ci.yml?query=branch%3Amain)
+[![nightly](https://github.com/shaktisuman/eldconv/actions/workflows/nightly.yml/badge.svg?event=schedule)](https://github.com/shaktisuman/eldconv/actions/workflows/nightly.yml?query=event%3Aschedule)
+
 Convert a build that links with **bfd, lld, gold or mold** into a copy that links with
 **[Qualcomm eld](https://github.com/qualcomm/eld)**, then build it and verify that eld really
 performed every link.
@@ -158,7 +162,7 @@ Configure-time probe links (CMake `try_compile`, autoconf `conftest`, Meson sani
 - Bazel is not supported.
 
 More: [docs/VALIDATION.md](docs/VALIDATION.md) (real projects and kernel, bugs found),
-[docs/DESIGN.md](docs/DESIGN.md) (pipeline), [CHANGELOG.md](CHANGELOG.md).
+[docs/DESIGN.md](docs/DESIGN.md) (pipeline).
 
 ## Development
 

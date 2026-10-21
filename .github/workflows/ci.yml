@@ -56,7 +56,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends generate-ninja || echo "::notice::gn not available"
       - run: pip install -e '.[test]'
       - name: pytest
-        run: pytest -ra
+        run: pytest -ra | tee pytest.out
+      - name: Keep the result for the tests badge
+        if: always() && matrix.python == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-out
+          path: pytest.out
+          if-no-files-found: ignore
 
   package:
     # the installed wheel must carry its data files and work from the command line
@@ -94,3 +101,34 @@ jobs:
             eldconv convert "$GITHUB_WORKSPACE/tests/fixtures/$fx" "out/$fx" --eld "$PWD/fake-eld/ld.eld" --check
             echo "::endgroup::"
           done
+
+  badge:
+    # tests.json on the `badges` branch feeds the "tests" badge in README.md
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: pytest-out
+      - name: Write tests.json
+        run: python3 -I ci/test_badge.py pytest.out > "$RUNNER_TEMP/tests.json"
+      - name: Publish it to the badges branch
+        run: |
+          git fetch origin badges || true
+          if git rev-parse --verify -q origin/badges >/dev/null; then
+            git checkout -B badges origin/badges
+          else
+            git checkout --orphan badges
+            git rm -rf -q .
+          fi
+          cp "$RUNNER_TEMP/tests.json" tests.json
+          git add tests.json
+          if git diff --cached --quiet; then exit 0; fi
+          git -c user.name=github-actions[bot] -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+            commit -q -m "tests badge for ${GITHUB_SHA::7}"
+          git push origin badges
