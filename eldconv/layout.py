@@ -196,10 +196,15 @@ def compare_layout(ref: ELF, new: ELF, scripted: bool = False) -> List[Finding]:
                                 f"the reference has {' '.join(rp) or 'none'}")
     ra, na = max((p.align for p in rl), default=0), max((p.align for p in nl), default=0)
     if na and ra and na < ra:
-        add("warn", "alignment", f"PT_LOAD segments are aligned to {na:#x}; the reference aligns them "
-                                 f"to {ra:#x}: on a system with larger pages they cannot be mapped")
+        # a kernel or firmware image is placed by its boot loader, not mapped page by page
+        booted = scripted and ref.interp is None
+        add("info" if booted else "warn", "alignment",
+            f"PT_LOAD segments are aligned to {na:#x}; the reference aligns them to {ra:#x}: "
+            "on a system with larger pages they cannot be mapped")
 
-    # what each section is loaded as
+    # what each section is loaded as. A permission the reference grants is only missed if the
+    # section asks for it: GNU ld puts much of a kernel in one RWX segment, and loading
+    # __ex_table read-only there loses nothing.
     rsec = {s.name: s for s in _placed(ref)}
     nsec = {s.name: s for s in _placed(new)}
     common = [n for n in rsec if n in nsec]
@@ -208,9 +213,9 @@ def compare_layout(ref: ELF, new: ELF, scripted: bool = False) -> List[Finding]:
         a, b = _load_of(ref, rsec[n]), _load_of(new, nsec[n])
         if a is None or b is None:
             continue        # validate() reports an allocated section outside every segment
-        if a.flags & PF_W and not b.flags & PF_W:
+        if a.flags & PF_W and not b.flags & PF_W and nsec[n].flags & SHF_WRITE:
             lost_w.append(n)
-        if a.flags & PF_X and not b.flags & PF_X:
+        if a.flags & PF_X and not b.flags & PF_X and nsec[n].flags & SHF_EXECINSTR:
             lost_x.append(n)
         if b.flags & PF_X and not a.flags & PF_X:
             got_x.append(n)
@@ -220,11 +225,11 @@ def compare_layout(ref: ELF, new: ELF, scripted: bool = False) -> List[Finding]:
                 and not _inside(new, nsec[n], PT_GNU_RELRO)):
             lost_relro.append(n)
     if lost_w:
-        add("error", "permissions", f"loaded read-only, but the reference loads them writable "
-                                    f"(written at run time or by the loader): {_names(lost_w)}")
+        add("error", "permissions", f"writable sections loaded read-only; the reference loads them "
+                                    f"writable: {_names(lost_w)}")
     if lost_x:
-        add("error", "permissions", f"loaded without execute permission; the reference executes "
-                                    f"them: {_names(lost_x)}")
+        add("error", "permissions", f"code loaded without execute permission; the reference executes "
+                                    f"it: {_names(lost_x)}")
     if got_x:
         add("warn", "permissions", f"mapped executable together with the code; the reference keeps "
                                    f"them out of executable segments (-z separate-code): {_names(got_x)}")

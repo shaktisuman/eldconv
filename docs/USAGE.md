@@ -302,7 +302,7 @@ that uses a linker script (`-T`, `-Ttext`, ...) is held to the original's layout
 |---|---|
 | ELF class, machine or type; `PT_INTERP`; `DT_SONAME` | error |
 | no `PT_GNU_STACK` where the original has a non-executable stack (the loader then assumes an executable one; glibc 2.41+ refuses to `dlopen` it) | error |
-| a section loaded read-only that the original loads writable, or without execute permission where the original executes it | error |
+| a writable section (`SHF_WRITE`) loaded read-only, or code (`SHF_EXECINSTR`) loaded without execute permission, where the original loads it so | error |
 | `PT_TLS` or `PT_ARM_EXIDX` missing | error |
 | linker script: another base address or physical (load) address; a section-edge symbol (`__bss_start`, `__start_foo`) no longer at that edge | error |
 | a `*_start`/`*_end` or `__start_X`/`__stop_X` range that is empty but holds data in the original | error |
@@ -314,7 +314,7 @@ that uses a linker script (`-T`, `-Ttext`, ...) is held to the original's layout
 | an allocated section or global symbol missing | warning |
 | more than 10% (and 64 KiB) larger or smaller | warning |
 | read-only data mapped executable with the code (no `-z separate-code`); a section writable that the original loads read-only; a section outside `PT_GNU_RELRO` that the original covers | warning |
-| `PT_GNU_EH_FRAME` or `PT_GNU_PROPERTY` missing; `PT_LOAD` aligned to smaller pages than the original | warning |
+| `PT_GNU_EH_FRAME` or `PT_GNU_PROPERTY` missing; `PT_LOAD` aligned to smaller pages than the original (information for a linker-script image without an interpreter, which a boot loader places) | warning |
 | linker script: sections in another order | warning |
 | sections and symbols linkers make up for themselves; size; another set of `PT_LOAD` segments; sections in another order or at other addresses; sections more than 10% larger or smaller | info |
 

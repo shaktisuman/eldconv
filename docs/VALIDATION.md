@@ -257,3 +257,11 @@ the same 9 outputs:
 Section order and addresses differ too (eld places `.gnu.hash` and `.eh_frame_hdr` elsewhere); for
 images a linker script does not place, that is only information.
 
+On the arm64 kernel (nightly, `tinyconfig`), the first version of the permission check failed
+`vmlinux`: GNU ld loads most of it from one RWX segment, eld from separate R, RX and RW ones, so
+`__ex_table`, `__param` and `.rodata` looked like sections that lost write or execute permission. A
+permission now counts as lost only if the section's own flags ask for it (`SHF_WRITE`,
+`SHF_EXECINSTR`), and the 4 KiB against 64 KiB segment alignment of a linker-script image without an
+interpreter is information. Base address, load addresses, section-edge symbols and ranges report
+nothing for `vmlinux`; the vDSO keeps its two known warnings (an RWX segment, no `.rodata`).
+
