@@ -211,3 +211,17 @@ def test_dT_renamed_to_default_script(spelling):
     out, d = convert_args(parse_wl(f"-Wl,{spelling},custom.lds"), "bfd")
     assert [a.parts() for a in out] == [["--default-script=custom.lds"]]
     assert d[0].level == "info" and "renamed" in d[0].message
+
+
+def test_no_rule_is_shadowed_by_an_earlier_one():
+    """First match wins, so a rule an earlier one already covers (same or wider name glob,
+    value and linkers) never applies: a duplicate left behind, or a rule in the wrong place."""
+    from fnmatch import fnmatchcase
+    dead = []
+    for i, r in enumerate(RULES):
+        for q in RULES[:i]:
+            if (fnmatchcase(r.name, q.name) and r.linkers <= q.linkers
+                    and (q.value is None or (r.value is not None and fnmatchcase(r.value, q.value)))):
+                dead.append(f"{r.name} {r.value or ''} (rule {i}) is shadowed by {q.name} {q.value or ''}")
+                break
+    assert not dead, "\n".join(dead)

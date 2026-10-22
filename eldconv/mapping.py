@@ -278,9 +278,9 @@ RULES: List[Rule] = [
     K("--merge-exidx-entries", "ARM; accepted by current eld", linkers=("lld",)),
     K("--no-merge-exidx-entries", "ARM; accepted by current eld", linkers=("lld",)),
     K("--copy-dt-needed-entries", tentative=True), K("--no-copy-dt-needed-entries", tentative=True),
-    K("--exclude-libs", tentative=True), D("--unique", "not accepted by eld 24.0"), K("--disable-new-dtags", tentative=True),
+    D("--unique", "not accepted by eld 24.0"), K("--disable-new-dtags", tentative=True),
     K("--enable-new-dtags", tentative=True), K("--noinhibit-exec", tentative=True),
-    K("--unique-output-sections", tentative=True), K("--print-memory-usage", tentative=True),
+    K("--unique-output-sections", tentative=True),
 ]
 
 
