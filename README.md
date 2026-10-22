@@ -98,6 +98,7 @@ Common `convert` options:
 | `--source-linker {bfd,lld,gold,mold}` | override detection (also picks which branch of a conditional to convert) |
 | `--build-system {cmake,make,gn,ninja,meson,autotools}` | override detection when a tree carries several |
 | `--eld-surface FILE\|auto\|bundled\|none` | which eld option snapshot to filter with (`auto` probes your `--eld` once and caches it) |
+| `--target ARCH` | the architecture the build links for: options eld accepts only for other targets (ARM errata, `--pic-veneer`, `--relax`, `-G`) are dropped |
 | `--force` | replace `DST`, only if it is empty or a previous eldconv output |
 | `--cmake-arg ARG` | extra argument for the generated CMake configure step (repeatable) |
 
@@ -129,6 +130,7 @@ The decision is filtered against a bundled snapshot of what a recent ld.eld acce
 If your eld is older or newer, use `--eld-surface auto` (probes your `--eld` once, caches the result)
 or build a file with `eldconv surface`. When the ld.eld in use (`--eld`, else `PATH`) lacks options
 the snapshot assumes in its `--help`, `convert` warns that the snapshot is newer than your eld.
+An option counts as accepted if eld takes it for any target, unless you name the target with `--target`.
 
 ## What `check` verifies
 

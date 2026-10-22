@@ -55,21 +55,29 @@ class Surface:
     z: Dict[str, List[str]] = field(default_factory=dict)         # -z keyword -> targets
 
     # -- lookup --------------------------------------------------------------
-    def accepts(self, name: str, value: Optional[str] = None) -> Optional[bool]:
-        """True/False if this surface knows; None if the option was never probed.
-
-        An option counts as accepted if eld takes it for *any* target: eld's
-        ARM/AArch64 driver knows options its x86-64 driver does not, and which
-        one a build uses depends on its inputs.
-        """
+    def accepting(self, name: str, value: Optional[str] = None) -> Optional[List[str]]:
+        """The targets eld accepts this option for; None if it was never probed."""
         if name == "-z":
             if not value:
                 return None
-            key = value.split("=", 1)[0]
-            hit = self.z.get(key)
-            return None if hit is None else bool(hit)
-        hit = self.options.get(name)
-        return None if hit is None else bool(hit)
+            return self.z.get(value.split("=", 1)[0])
+        return self.options.get(name)
+
+    def accepts(self, name: str, value: Optional[str] = None,
+                target: Optional[str] = None) -> Optional[bool]:
+        """True/False if this surface knows; None if the option was never probed.
+
+        Without a target (or for one this snapshot did not probe), an option counts
+        as accepted if eld takes it for *any* target: eld's ARM/AArch64 driver knows
+        options its x86-64 driver does not, and which one a build uses depends on
+        its inputs.
+        """
+        hit = self.accepting(name, value)
+        if hit is None:
+            return None
+        if target and target in self.targets:
+            return target in hit
+        return bool(hit)
 
     def as_dict(self) -> dict:
         return {"eld_version": self.eld_version, "targets": self.targets,
@@ -198,6 +206,72 @@ def use_surface(s: Optional[Surface]) -> Iterator[None]:
 
 def set_active(s: Optional[Surface]) -> None:
     _ACTIVE.set(s)
+
+
+# ----------------------------------------------------------------------- targets
+
+# The target a conversion is for (`--target`), or None for "any target eld has". Only
+# 13 options in the bundled snapshot depend on it (ARM errata, --pic-veneer, --relax,
+# -G, ...), but without it an option eld's x86-64 driver ignores is kept in an x86-64
+# conversion because the AArch64 driver knows it.
+_TARGET: contextvars.ContextVar = contextvars.ContextVar("eldconv_target", default=None)
+
+_TARGET_ALIASES = {"arm64": "aarch64", "amd64": "x86_64", "x86-64": "x86_64", "x64": "x86_64",
+                   "armhf": "arm", "armel": "arm", "x86": None, "riscv": None}
+
+# bfd/eld emulation names (`-m EMULATION`) by target
+_EMULATIONS = (
+    (re.compile(r"elf(?:32)?_x86_64"), "x86_64"),
+    (re.compile(r"elf_i386|elf_iamcu"), "i386"),
+    (re.compile(r"aarch64"), "aarch64"),
+    (re.compile(r"arm"), "arm"),
+    (re.compile(r"elf64[lb]riscv"), "riscv64"),
+    (re.compile(r"elf32[lb]riscv"), "riscv32"),
+    (re.compile(r"hexagon"), "hexagon"),
+)
+
+
+def normalize_target(name: str) -> Optional[str]:
+    """`aarch64`, `arm64`, `aarch64-linux-gnu`, `i686`, `armv7a` -> a TARGETS key; None
+    if it is not a target eld has (or, like the kernel's `x86`, names more than one)."""
+    t = name.strip().lower()
+    if t in TARGETS:
+        return t
+    if t in _TARGET_ALIASES:
+        return _TARGET_ALIASES[t]
+    arch = t.split("-", 1)[0]
+    if arch != t:                                   # a triple
+        return normalize_target(arch)
+    if re.fullmatch(r"i[3-6]86", t):
+        return "i386"
+    if re.fullmatch(r"armv\d+\w*|thumbv\d+\w*", t):
+        return "arm"
+    return None
+
+
+def emulation_target(emu: str) -> Optional[str]:
+    """The target of a `-m EMULATION` value (`aarch64linux` -> aarch64), or None."""
+    for rx, t in _EMULATIONS:
+        if rx.match(emu):
+            return t
+    return None
+
+
+def active_target() -> Optional[str]:
+    return _TARGET.get()
+
+
+def set_target(t: Optional[str]) -> None:
+    _TARGET.set(t)
+
+
+@contextmanager
+def use_target(t: Optional[str]) -> Iterator[None]:
+    tok = _TARGET.set(t)
+    try:
+        yield
+    finally:
+        _TARGET.reset(tok)
 
 
 # --------------------------------------------------------------------- building

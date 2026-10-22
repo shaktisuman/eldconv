@@ -27,6 +27,8 @@ detect  ->  convert (flags + build files)  ->  generate (new dir)  ->  check (bu
    the *surface*, an empirical snapshot of which options and `-z` keywords a real ld.eld accepts
    per target. eld ignores unknown options with only a warning, so an option eld lacks is dropped
    with a severity even when the table would keep it. Unknown flags are kept and reported.
+   The target is "any" unless `--target` names it (a context variable, like the surface), or the
+   options come with their own `-m EMULATION`.
    The bundled snapshot is from eld `main` of 13 Oct 2026; `--eld-surface auto` probes and caches
    the user's own eld; `audit` compares the table with a real eld.
 

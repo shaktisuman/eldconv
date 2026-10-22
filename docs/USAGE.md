@@ -45,6 +45,17 @@ targets other than the host needs `clang`; without it only x86_64 is probed. Wit
 (bundled) snapshot, `convert` warns when your ld.eld's `--help` lacks options the snapshot assumes,
 i.e. your eld is older than the snapshot. `--eld-surface none` trusts the rule table alone.
 
+**Targets.** Some options eld accepts only for some targets: the ARM errata fixes, `--pic-veneer`,
+`--merge-exidx-entries`, `--target2` and `--execute-only` (ARM and AArch64), `--relax`/`--no-relax`
+(x86_64 and RISC-V), `-G`/`--gpsize` (not x86). By default an option counts as accepted if eld takes
+it for any target, because the converter cannot tell what a build links for. Pass `--target ARCH`
+(`x86_64`, `aarch64`, `arm`, `riscv64`, `riscv32`, `i386`, `hexagon`, an alias such as `arm64`, or a
+triple such as `aarch64-linux-gnu`) and such an option is dropped, with a warning that names the
+targets eld does take it for. Options passed together with `-m EMULATION` (`-Wl,-m,aarch64linux,...`)
+are checked against that emulation's target. Bare options in a variable (`LDFLAGS += --pic-veneer`) are
+left alone either way, as without `--target`. A target the snapshot has no entry for is treated as
+"any target", with a warning.
+
 **Severity.** A dropped option is either harmless (reported as `warn`) or loses an effect (reported
 as `error`, e.g. `--icf=all`: the binary is no longer folded). `error` does not stop the conversion
 unless you pass `--strict`.
@@ -230,6 +241,7 @@ Diagnostics go to stderr, the converted flags to stdout.
 | `--toolchain-file F` | CMake: original toolchain file to chain |
 | `--cmake-arg A` | CMake: extra configure argument, repeatable |
 | `--eld-surface X` | `bundled` (default), `auto` (probe `--eld`, cache it), a file from `eldconv surface`, or `none` |
+| `--target ARCH` | the architecture the build links for: drop options eld accepts only for other targets (see **Targets** above) |
 | `--force` | replace `DST`; refused unless `DST` is empty or contains `eldconv-report.json` |
 | `--strict` | exit 1 if the conversion reported any `error` diagnostic |
 | `--check` | run `check` afterwards; it takes every `check` option below except `--eld`, `--cmake-arg` (shared with the conversion) and `--dry-run` |
@@ -299,7 +311,7 @@ yourself (say `ld.bfd`'s and eld's link of the same objects). Prints JSON; exit 
 |---|---|
 | `--source-linker L` | the linker the flags were written for (default `bfd`) |
 | `--raw` | the input is a bare `ld` argv, not compiler-driver flags (`-Wl,…`) |
-| `--eld-surface X`, `--eld PATH` | as for `convert` |
+| `--eld-surface X`, `--eld PATH`, `--target ARCH` | as for `convert` |
 
 ### `eldconv surface --eld PATH [-o FILE] [-j N]`
 

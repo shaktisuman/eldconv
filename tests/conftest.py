@@ -12,7 +12,9 @@ from eldconv import surface
 @pytest.fixture(autouse=True)
 def _no_surface():
     tok = surface._ACTIVE.set(None)
+    ttok = surface._TARGET.set(None)   # `flags --target` / `convert --target` set it process-wide
     yield
+    surface._TARGET.reset(ttok)
     surface._ACTIVE.reset(tok)
 
 
