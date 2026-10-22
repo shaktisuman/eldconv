@@ -201,6 +201,11 @@ ELD="${ELDCONV_ELD:-@ELD@}"
 export ELDCONV_ELD="$ELD"
 # Meson picks a linker from these too; eld is selected by the project itself.
 unset CC_LD CXX_LD OBJC_LD OBJCXX_LD FC_LD
-meson setup "$BUILD" "$SRC" "$@"
+# `meson setup` refuses a directory it has configured before
+if [ -d "$BUILD/meson-private" ]; then
+  meson setup --reconfigure "$BUILD" "$SRC" "$@"
+else
+  meson setup "$BUILD" "$SRC" "$@"
+fi
 meson compile -C "$BUILD"
 """
