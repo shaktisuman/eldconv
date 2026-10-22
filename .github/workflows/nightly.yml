@@ -229,11 +229,14 @@ jobs:
 
       - name: Build the kernel with eld and check every link went through it
         # configure.sh: tinyconfig plus what the boot needs. `check` cleans, then builds Image, whose
-        # dependencies include vmlinux and the vDSO, and fails if any link bypassed eld.
+        # dependencies include vmlinux and the vDSO, and fails if any link bypassed eld or left a
+        # malformed image. --compare also builds the unconverted tree with GNU ld and reports how
+        # eld's vmlinux and vDSO differ from that build's.
         run: |
           eldconv check "$RUNNER_TEMP/linux-eld" --eld "$ELD" --jobs "$(nproc)" --timeout 7200 \
             --pre-build "$GITHUB_WORKSPACE/ci/kernel/configure.sh" \
             --build-arg ARCH="$ARCH" --build-arg CROSS_COMPILE="$CROSS_COMPILE" --build-arg Image \
+            --compare \
             | tee check.txt
 
       - name: Boot the eld-linked kernel under qemu
@@ -243,11 +246,15 @@ jobs:
         if: always()
         run: |
           cp "$RUNNER_TEMP/linux-eld/eldconv-report.md" . 2>/dev/null || true
+          cp "$RUNNER_TEMP/linux-eld/build-eld/eldconv-check.json" . 2>/dev/null || true
+          cp "$RUNNER_TEMP/linux-eld/build-eld/eldconv-build.log" . 2>/dev/null || true
+          cp "$RUNNER_TEMP/linux-eld.reference/build-eld/eldconv-reference-build.log" . 2>/dev/null || true
           cp "$RUNNER_TEMP/linux-eld/.config" kernel.config 2>/dev/null || true
           cp "$RUNNER_TEMP/linux-eld/arch/arm64/boot/Image" . 2>/dev/null || true
           {
             echo "### kernel \`$KERNEL_REF\` on arm64"
             grep -a -m1 '^Linux version' boot.log 2>/dev/null || echo "no boot log"
+            python3 ci/kernel/summarize.py eldconv-check.json 2>/dev/null || true
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
@@ -255,6 +262,9 @@ jobs:
           name: kernel-eld
           path: |
             eldconv-report.md
+            eldconv-check.json
+            eldconv-build.log
+            eldconv-reference-build.log
             check.txt
             boot.log
             kernel.config

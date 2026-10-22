@@ -5,6 +5,7 @@
   eldconv check   DST [--eld PATH] [--build-dir DIR] [--build-arg ARG] [--dry-run]
   eldconv flags   "-Wl,--icf=all -Wl,--gc-sections" [--source-linker lld] [--raw]
   eldconv audit   [--eld PATH]
+  eldconv compare REFERENCE OUTPUT
   eldconv surface --eld PATH [-o FILE]
 
 Exit status: 0 success; 1 check/audit failed, or `convert --strict` produced
@@ -104,6 +105,8 @@ def cmd_check(a) -> int:
                     timeout=getattr(a, "timeout", None), pre_build=getattr(a, "pre_build", None) or [],
                     allow_unresolved_data=getattr(a, "allow_unresolved_data", False),
                     allow_ignored_version_scripts=getattr(a, "allow_ignored_version_scripts", False),
+                    compare=getattr(a, "compare", False),
+                    reference_dir=Path(a.reference_dir) if getattr(a, "reference_dir", None) else None,
                     log=_log(a))
     if a.dry_run:
         for c in res.commands:
@@ -117,6 +120,9 @@ def cmd_check(a) -> int:
         print("--- stderr tail ---\n" + res.stderr_tail, file=sys.stderr)
     if not res.ok and res.build_log:
         print(f"full build output: {res.build_log}", file=sys.stderr)
+    if res.reference and res.reference.get("returncode") == 0:
+        print(f"compared {res.reference['compared']} output(s) with the reference build in "
+              f"{res.reference['dir']}", file=sys.stderr)
     print("CHECK " + ("PASSED" if res.ok else "FAILED"))
     return 0 if res.ok else 1
 
@@ -161,6 +167,25 @@ def cmd_surface(a) -> int:
           f"{acc}/{len(s.options)} options and {sum(1 for v in s.z.values() if v)}/{len(s.z)} "
           f"-z keywords accepted", file=sys.stderr)
     return 0
+
+
+def cmd_compare(a) -> int:
+    from .elf import open_elf
+    from .elfcheck import compare, validate
+    with open_elf(a.reference) as ref, open_elf(a.output) as out:
+        for p, e in ((a.reference, ref), (a.output, out)):
+            if e is None:
+                print(f"eldconv: {p} is not an ELF file", file=sys.stderr)
+                return 2
+        found = [dict(f.as_dict(), check="validate") for f in validate(out)] \
+            + [dict(f.as_dict(), check="compare") for f in compare(ref, out)]
+    print(json.dumps({"reference": a.reference, "output": a.output, "findings": found}, indent=2))
+    for f in found:
+        print(f"[{f['level']}] {f['what']}: {f['message']}", file=sys.stderr)
+    bad = sum(1 for f in found if f["level"] == "error")
+    print(f"COMPARE: {bad} error(s), {sum(1 for f in found if f['level'] == 'warn')} warning(s)",
+          file=sys.stderr)
+    return 1 if bad else 0
 
 
 def cmd_flags(a) -> int:
@@ -211,6 +236,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--no-clean", action="store_true",
                    help="build incrementally (an up-to-date tree then verifies nothing)")
     g.add_argument("--timeout", type=int, default=None, help="per-command timeout in seconds")
+    g.add_argument("--compare", action="store_true",
+                   help="also build the original tree with its own linker (in a copy) and report "
+                        "how each eld output differs from its counterpart there")
+    g.add_argument("--reference-dir", metavar="DIR",
+                   help="--compare: where to build the original (default: DST.reference)")
 
     d = sub.add_parser("detect", parents=[common], help="detect build system / toolchain / linker")
     d.add_argument("src")
@@ -258,6 +288,12 @@ def build_parser() -> argparse.ArgumentParser:
     sf.add_argument("-o", "--output", help="output file (default: stdout)")
     sf.add_argument("--jobs", "-j", type=int, default=8)
     sf.set_defaults(fn=cmd_surface)
+
+    cp = sub.add_parser("compare", parents=[common],
+                        help="check an ELF file and compare it with the same file from another linker")
+    cp.add_argument("reference", help="the file as the original linker made it")
+    cp.add_argument("output", help="the file as eld made it")
+    cp.set_defaults(fn=cmd_compare)
 
     f = sub.add_parser("flags", parents=[common], help="convert a flag string")
     f.add_argument("flags", nargs="+", help="flag string (leading dashes are fine)")

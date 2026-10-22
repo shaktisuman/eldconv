@@ -82,6 +82,7 @@ the report format, CI integration and troubleshooting.
 | `eldconv check DST` | clean build of the converted tree through the shim, then verify |
 | `eldconv flags "<flags>"` | convert a flag string, e.g. `-Wl,--icf=all -Wl,-z,now`; `--raw` for a bare `ld` argv |
 | `eldconv surface --eld PATH -o FILE` | snapshot which options *your* eld accepts |
+| `eldconv compare REF OUT` | validate `OUT` (eld's file) and report how it differs from `REF` (the original linker's) |
 | `eldconv audit --eld PATH` | compare the mapping table with a real ld.eld (maintainers) |
 
 Every command takes `-v` (decisions and why) and `-vv` (every file and flag).
@@ -138,7 +139,16 @@ the snapshot assumes in its `--help`, `convert` warns that the snapshot is newer
 5. no binary in the tree was linked by *another* linker (read from ELF `.comment`/build-id);
 6. no executable has undefined data symbols without a relocation (it would link and then crash).
 7. eld did not skip a version script (an eld built without `-DELD_ENABLE_SYMBOL_VERSIONING=ON`,
-   the default, ignores named version nodes; `--allow-ignored-version-scripts` makes it a warning).
+   the default, ignores named version nodes; `--allow-ignored-version-scripts` makes it a warning);
+8. every output is a well-formed image: headers and tables inside the file, loadable segments
+   aligned and not overlapping, the entry point in an executable segment, every allocated section
+   loaded (writable+executable segments and executable stacks are warnings).
+
+With `--compare`, `check` also builds the original tree with its original linker, in a copy next to
+the converted one, and reports how each eld output differs from its counterpart there: interpreter,
+SONAME, needed libraries, exported symbols and their versions, RELRO / BIND_NOW / PIE / stack,
+sections, global symbols and size. Lost exports and lost hardening fail the check; the rest are
+warnings. `eldconv compare REF OUT` does the same for two files you built yourself.
 
 Configure-time probe links (CMake `try_compile`, autoconf `conftest`, Meson sanity checks, kbuild
 `ld-option`) are recognised and not judged as outputs.

@@ -248,12 +248,46 @@ Diagnostics go to stderr, the converted flags to stdout.
 | `--no-probe` | skip validating flags against `ld.eld --help` |
 | `--allow-unresolved-data` | report binaries with undefined data symbols and no relocation as warnings instead of failures |
 | `--allow-ignored-version-scripts` | report version scripts eld skipped as warnings instead of failures |
+| `--compare` | also build the original tree with its own linker and report how each eld output differs (below) |
+| `--reference-dir DIR` | where `--compare` builds the original (default: `DST.reference`); an existing directory is only replaced if `--compare` made it |
 | `--timeout S` | per-command timeout; it stops the whole build, not only its top command |
 | `-j N` | parallel jobs (default: the number of CPUs) |
 
 Results are printed as JSON and saved to `<build dir>/eldconv-check.json`. Every command's full
 output is in `<build dir>/eldconv-build.log` (printed as it arrives with `-v`; the JSON keeps only
 the last 4000 characters). The shim log is `<build dir>/eld-link.log`.
+
+Every output is also checked as an image: section and program headers inside the file, `PT_LOAD`
+segments aligned and not overlapping, the entry point inside an executable segment, every allocated
+section inside a loaded segment, a `PT_INTERP` path and a dynamic string table where they are
+needed, symbols that point at real sections. A failure means a broken image whatever linked it.
+Writable+executable segments, an executable stack and text relocations are warnings.
+
+**`--compare`.** The original tree (the `source` recorded in `eldconv-report.json`) is copied to
+`DST.reference` and built there with its own linker: the same `--pre-build` commands and
+`--build-arg`s, without the shim. Each eld output is then compared with the file of the same path
+in that build:
+
+| difference | level |
+|---|---|
+| ELF class, machine or type; `PT_INTERP`; `DT_SONAME` | error |
+| a library no longer needed (`DT_NEEDED`) | error |
+| a symbol no longer exported, or exported with another version | error |
+| RELRO, BIND_NOW or PIE lost; an executable stack gained | error |
+| a library newly needed; a symbol newly exported or newly undefined | warning |
+| `RUNPATH`; text relocations; build-id; entry symbol | warning |
+| an allocated section or global symbol missing | warning |
+| more than 10% (and 64 KiB) larger or smaller | warning |
+| sections and symbols linkers make up for themselves; size | info |
+
+Errors fail the check, warnings are listed, and every difference is recorded per output in
+`eldconv-check.json` (`differences`, next to `reference`). The reference build's output is in
+`DST.reference/<build dir>/eldconv-reference-build.log`.
+
+### `eldconv compare REF OUT`
+
+Validates `OUT` and compares it with `REF` as `check --compare` does, for two files you built
+yourself (say `ld.bfd`'s and eld's link of the same objects). Prints JSON; exit 1 if any error.
 
 ### `eldconv flags "FLAGS"`
 
