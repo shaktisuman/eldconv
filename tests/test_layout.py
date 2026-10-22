@@ -132,6 +132,15 @@ def test_missing_gnu_stack(src):
         assert ("error", "stack") in {(f.level, f.what) for f in compare(r, n)}
     with open_elf(a) as n:
         assert "stack" not in _what(validate(n))
+    # glibc's default stack is not executable on AArch64: nothing to report there
+    data = bytearray((src / "libb.so").read_bytes())
+    struct.pack_into("<H", data, 18, 183)
+    (src / "libc64.so").write_bytes(bytes(data))
+    rdata = bytearray(a.read_bytes())
+    struct.pack_into("<H", rdata, 18, 183)
+    (src / "liba64.so").write_bytes(bytes(rdata))
+    with open_elf(src / "liba64.so") as r, open_elf(src / "libc64.so") as n:
+        assert "stack" not in _what(validate(n)) and "stack" not in _what(compare(r, n))
 
 
 @needs_cc

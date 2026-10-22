@@ -45,7 +45,9 @@ detect  ->  convert (flags + build files)  ->  generate (new dir)  ->  check (bu
    Copy the tree to a temporary sibling of the new dir, apply rewrites, add the files below, then
    rename into place (atomic):
    - `eld-bin/ld` shim: logs every invocation (when `ELDCONV_LINK_LOG` is set), strips GCC's LTO
-     plugin arguments and a few `-z` hints eld rejects, and execs `ld.eld`. Selected with
+     plugin arguments and a few `-z` hints eld rejects, decides the stack from the inputs'
+     `.note.GNU-stack` sections as GNU ld does (`eld-bin/eldconv-stack.py`, a copy of
+     `eldconv/execstack.py`), and execs `ld.eld`. Selected with
      `-B<eld-bin>/` (gcc and clang), plus `COMPILER_PATH` and `LD=` where the build system uses them.
    - CMake: `eld-toolchain.cmake`, `eld-project-include.cmake` (`add_link_options`) and `build-eld.sh`.
    - Make: `eld.mk`, included by the entry-point makefiles.

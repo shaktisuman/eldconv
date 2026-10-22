@@ -240,10 +240,14 @@ the same 9 outputs:
 
 - **No `PT_GNU_STACK`** (error). eld writes the segment only for an explicit `-z noexecstack` or
   `-z execstack`; it ignores the inputs' `.note.GNU-stack` sections, from which GNU ld decides. Without
-  the segment the loader assumes an executable stack. On this host's glibc 2.43, `dlopen` of eld's
-  `liblz4.so` and `libz.so` fails with "cannot enable executable stack as shared object requires",
-  and GNU ld's builds of the same libraries load. A minimal `-shared` link through eld gets
-  `GNU_STACK RW` with `-Wl,-z,noexecstack`, and none without it.
+  the segment the loader assumes an executable stack (on x86_64; glibc's default is non-executable on
+  AArch64 and RISC-V). On this host's glibc 2.43, `dlopen` of eld's `liblz4.so` and `libz.so` failed
+  with "cannot enable executable stack as shared object requires", and GNU ld's builds of the same
+  libraries load. A minimal `-shared` link through eld gets `GNU_STACK RW` with `-Wl,-z,noexecstack`,
+  and none without it. The shim now makes GNU ld's decision (bfd/elflink.c: an executable note, or a
+  missing note on a target whose `elf_backend_default_execstack` is 1, means an executable stack) and
+  passes it to eld: after reconverting, lz4, zlib (CMake) and lua get `GNU_STACK RW` on every output,
+  `liblz4.so` loads, and `check` passes. Deciding costs about 14 ms per link.
 - **No `PT_GNU_PROPERTY`** (warning): `.note.gnu.property` is not carried over, so the inputs' CET
   markings are lost.
 - **Read-only data in the code segment** (warning): eld maps the headers, `.rodata`, `.eh_frame` and

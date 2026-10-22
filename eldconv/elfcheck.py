@@ -34,7 +34,11 @@ class Finding:
 
 # ---------------------------------------------------------------------------- validate
 
-# What a missing PT_GNU_STACK does on Linux: the default stack permissions include execute.
+# What a missing PT_GNU_STACK does: glibc's default stack permissions (DEFAULT_STACK_PROT_PERMS)
+# include execute on these machines (EM_*): SPARC, i386, m68k, MIPS, PA-RISC, PowerPC (32-bit),
+# s390, ARM, SuperH, x86_64, OpenRISC, MicroBlaze, Alpha. AArch64, RISC-V, LoongArch and the
+# others use the generic, non-executable default.
+EXEC_STACK_DEFAULT = frozenset({2, 3, 4, 8, 10, 15, 18, 20, 22, 40, 42, 43, 62, 92, 189, 0x9026})
 _NO_STACK = ("thread stacks are mapped executable, and glibc 2.41 and later refuse to dlopen "
              "such a library")
 
@@ -99,7 +103,8 @@ def validate(elf: ELF) -> List[Finding]:
                 bad("segment", f"PT_LOAD at {p.vaddr:#x} is writable and executable", "warn")
         if elf.exec_stack:
             bad("stack", "PT_GNU_STACK asks for an executable stack", "warn")
-        elif elf.exec_stack is None and (elf.interp or elf.needed or elf.soname):
+        elif (elf.exec_stack is None and elf.machine in EXEC_STACK_DEFAULT
+              and (elf.interp or elf.needed or elf.soname)):
             # (what ld.so loads; a kernel image has a dynamic section, but none of these)
             # eld writes PT_GNU_STACK only for an explicit -z [no]execstack: it does not read
             # the inputs' .note.GNU-stack sections as GNU ld does
@@ -271,7 +276,7 @@ def compare(ref: ELF, new: ELF, roots: Optional[Tuple[str, str]] = None,
     if needs:
         add("warn", "imports", f"{len(needs)} undefined symbol(s) the reference does not need: {_list(needs)}")
 
-    if ref.exec_stack is False and new.exec_stack is None:
+    if ref.exec_stack is False and new.exec_stack is None and new.machine in EXEC_STACK_DEFAULT:
         add("error", "stack", f"has no PT_GNU_STACK, so it needs an executable stack ({_NO_STACK}); "
                               "the reference marks the stack non-executable")
     if not ref.exec_stack and new.exec_stack:
