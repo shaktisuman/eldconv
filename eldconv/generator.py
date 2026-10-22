@@ -6,12 +6,13 @@ import os
 import re
 import shutil
 import stat
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from . import __version__
+from . import __version__, execstack
 from .converters.cmake import rewrite_cmake_cache_text, rewrite_cmake_presets_text, rewrite_cmake_text
 from .converters.gn import ARGS_GN, rewrite_gn_text, rewrite_ninja_text
 from .converters.autotools import (BUILD_SH_AUTOTOOLS, PATCH_LIBTOOL_SH, patch_libtool_text,
@@ -31,6 +32,7 @@ MK_FILE = "eld.mk"
 REPORT_JSON = "eldconv-report.json"
 REPORT_MD = "eldconv-report.md"
 BUILD_SCRIPT = "build-eld.sh"
+STACK_HELPER = "eldconv-stack.py"   # the shim's GNU-ld-style PT_GNU_STACK decision
 ARGS_GN_FILE = "eld-args.gn"
 
 SHIM_LD = r"""#!/bin/sh
@@ -40,22 +42,30 @@ SHIM_LD = r"""#!/bin/sh
 #    `-plugin-opt=` arguments go too; with LLVMgold.so they are kept, because eld
 #    understands LLVM's (-plugin-opt=O2, mcpu=, thinlto, ...).
 #  - Adds GNU ld's "supported targets" line to `--help` so libtool enables shared libraries.
+#  - Decides the stack from the inputs' .note.GNU-stack sections, as GNU ld does, and
+#    passes eld `-z execstack` or `-z noexecstack` (eld itself writes no PT_GNU_STACK
+#    otherwise); see eldconv-stack.py.
 #  - Logs the final argv when ELDCONV_LINK_LOG is set (used by `eldconv check`), with a
 #    copy of each response file it names.
 # ELDCONV_ELD overrides the ld.eld below; ELDCONV_KEEP_GCC_PLUGIN disables the filter.
-# (ELDCONV_KEEP_Z_HINTS likewise disables the -z hint filter further down.)
+# (ELDCONV_KEEP_Z_HINTS likewise disables the -z hint filter further down, and
+# ELDCONV_KEEP_STACK the stack decision.)
 ELD="${ELDCONV_ELD:-@ELD@}"
 # Rebuilding "$@" costs O(n) per argument, seconds on a link with thousands of inputs, so
 # the filters below only run when one pass finds something for them to remove.
-plug=0; zh=0; rsp=0; prev=
+plug=0; zh=0; rsp=0; stk=0; prev=
 for a in "$@"; do
   case "$a" in
     *liblto_plugin*|*LLVMgold*) plug=1;;
     -zibt|-zshstk|-zibtplt|-zcet-report=*|-zorigin|-zrewrite-endbr) zh=1;;
+    -zexecstack|-znoexecstack|-r|--relocatable|-relocatable|-i|-Ur|--help|--version|-v|-V) stk=1;;
     @?*) rsp=1;;
   esac
   if [ "$prev" = -z ]; then
-    case "$a" in ibt|shstk|ibtplt|cet-report=*|origin|rewrite-endbr) zh=1;; esac
+    case "$a" in
+      ibt|shstk|ibtplt|cet-report=*|origin|rewrite-endbr) zh=1;;
+      execstack|noexecstack) stk=1;;
+    esac
   fi
   prev="$a"
 done
@@ -135,6 +145,19 @@ if [ $zh = 1 ]; then
     esac
     set -- "$@" "$a"
   done
+fi
+# GNU ld derives PT_GNU_STACK from the inputs; eld writes it only when told to.
+if [ $stk = 0 ] && [ $# -gt 0 ] && [ -z "$ELDCONV_KEEP_STACK" ]; then
+  case "$0" in */*) here="${0%/*}";; *) here="@SHIM_DIR@";; esac
+  py="@PYTHON@"
+  [ -x "$py" ] || py=$(command -v python3 2>/dev/null) || py=
+  if [ ! -f "$here/eldconv-stack.py" ]; then
+    :
+  elif [ -n "$py" ]; then
+    z=$("$py" -I -S "$here/eldconv-stack.py" "$@") && [ -n "$z" ] && set -- "$@" "$z"
+  else
+    echo "$0: warning: no python3 to read the inputs' .note.GNU-stack; the output gets no PT_GNU_STACK" >&2
+  fi
 fi
 if [ -n "$ELDCONV_LINK_LOG" ]; then
   rec=
@@ -707,12 +730,14 @@ def _convert(src: Path, dst: Path, final: Path, eld: str, source_linker: Optiona
     log.step("generating eld selection")
     log.info(f"shim: {final / SHIM_DIR}/ld -> {eld}")
     shim = dst / SHIM_DIR
-    _write(shim / "ld", SHIM_LD.replace("@ELD@", eld), executable=True)
+    _write(shim / "ld", SHIM_LD.replace("@ELD@", eld).replace("@SHIM_DIR@", str(final / SHIM_DIR))
+           .replace("@PYTHON@", sys.executable or "python3"), executable=True)
+    _write(shim / STACK_HELPER, Path(execstack.__file__).read_text())
     for alias in ("ld.eld", "ld.bfd", "ld.lld", "ld.gold", "ld.mold", "mold"):
         p = shim / alias
         if not p.exists():
             os.symlink("ld", p)
-    report.generated.append(f"{SHIM_DIR}/ld (+ aliases)")
+    report.generated.append(f"{SHIM_DIR}/ld (+ aliases, {STACK_HELPER})")
 
     if info.system == "gn":
         _write(dst / ARGS_GN_FILE, ARGS_GN)

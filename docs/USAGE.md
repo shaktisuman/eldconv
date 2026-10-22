@@ -22,7 +22,12 @@ it. The shim:
   `-z cet-report=…`, `-z origin`),
 - applies both filters inside response files too (`@/tmp/ccXXXXXX`, which GCC hands to `ld` when it
   was given an `@file` itself), by passing eld a filtered copy,
-- adds GNU ld's "supported targets" line to `--help`, because libtool otherwise builds only static libraries.
+- adds GNU ld's "supported targets" line to `--help`, because libtool otherwise builds only static libraries,
+- decides the stack as GNU ld does, from the `.note.GNU-stack` sections of the relocatable inputs and of
+  `--whole-archive` members, and passes eld `-z execstack` or `-z noexecstack` (with GNU ld's warnings
+  for an input that makes the stack executable). eld itself writes no `PT_GNU_STACK` without one of them.
+  A link that names either option, or `-r`, is left alone. This step runs `eld-bin/eldconv-stack.py`
+  with the Python that ran `convert` (else `python3` on `PATH`).
 
 **The eld surface.** eld ignores unknown options with a warning. eldconv therefore filters every
 flag against a snapshot of what eld accepts. The bundled snapshot is a recent eld (`main` of 13 Oct 2026,
@@ -389,6 +394,7 @@ Typical `error` items: `--icf=*` (size grows), `-z pack-relative-relocs` (no REL
 | `ELDCONV_LINK_LOG` | shim | file that receives one record per link, plus `<file>.rsp/` for response files (set by `check`) |
 | `ELDCONV_KEEP_GCC_PLUGIN` | shim | do not strip GCC's LTO plugin arguments |
 | `ELDCONV_KEEP_Z_HINTS` | shim | do not strip `-z ibt/shstk/cet-report/origin` |
+| `ELDCONV_KEEP_STACK` | shim | do not decide the stack from the inputs' `.note.GNU-stack` sections (eld then writes no `PT_GNU_STACK` unless the link names `-z [no]execstack`) |
 | `ELDCONV_TEST_ELD` | tests | run the e2e tests against a real ld.eld |
 | `XDG_CACHE_HOME` | `--eld-surface auto` | where probed snapshots are cached (`$XDG_CACHE_HOME/eldconv`, default `~/.cache/eldconv`) |
 | `JOBS` | `build-eld.sh` | parallelism |

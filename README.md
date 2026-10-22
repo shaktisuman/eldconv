@@ -167,10 +167,13 @@ Configure-time probe links (CMake `try_compile`, autoconf `conftest`, Meson sani
   plugin (eldconv forces fat LTO objects; Clang LTO works). Older eld builds also lack an i386
   backend; recent ones link `-m elf_i386`, but an x86 kernel's final `vmlinux` link still stops on
   an eld program-header error, so use arm64, arm or riscv kernels.
-- **eld writes no `PT_GNU_STACK` unless the link says `-z noexecstack`**: it does not read the
-  inputs' `.note.GNU-stack` sections as GNU ld does. The dynamic loader then assumes an executable
-  stack, and glibc 2.41 and later refuse to `dlopen` such a library. `check` reports it (an error when
-  the original build has a non-executable stack); add `-Wl,-z,noexecstack` to the project's link flags.
+- **eld writes no `PT_GNU_STACK` unless the link says `-z noexecstack` or `-z execstack`**: it does
+  not read the inputs' `.note.GNU-stack` sections. On x86, ARM and most other targets the loader then
+  assumes an executable stack, and glibc 2.41 and later refuse to `dlopen` such a library. The shim
+  therefore decides as GNU ld does, from the relocatable inputs (and `--whole-archive` members), and
+  passes eld the result; members pulled from other archives are not known before the link and are not
+  read. It needs a Python 3 on the build machine; `ELDCONV_KEEP_STACK=1` turns it off. `check` reports
+  an output without `PT_GNU_STACK` where that means an executable stack.
 - **eld on x86_64 emits no copy relocations**: a dynamic executable that uses shared-library
   data (`stdout`, `environ`, C++ vtables) links and then segfaults. `check` fails such binaries on
   purpose; `--allow-unresolved-data` downgrades that to a warning so the conversion itself can still
