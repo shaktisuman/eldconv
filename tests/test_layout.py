@@ -175,6 +175,7 @@ void _start(void) { for (;;) { data_words[0] += bss_words[1]; } }
 
 
 def _image(tmp: Path, name: str, base: int = 0x100000, lma: int = 0x800000, data_flags: int = 6,
+           text_flags: int = 5,
            swap: bool = False, empty: bool = False, bss_marker_inside: bool = False) -> Path:
     obj = tmp / "image.o"
     if not obj.exists():
@@ -186,7 +187,7 @@ def _image(tmp: Path, name: str, base: int = 0x100000, lma: int = 0x800000, data
             + ("__mydata_end = .; *(.data*)" if empty else "*(.data*) __mydata_end = .;") + " } :data\n")
     bss = ("  .bss : { " + (". += 16; " if bss_marker_inside else "")
            + "__bss_start = .; *(.bss*) *(COMMON) __bss_end = .; } :data\n")
-    script = (f"ENTRY(_start)\nPHDRS {{ text PT_LOAD FLAGS(5); data PT_LOAD FLAGS({data_flags}); }}\n"
+    script = (f"ENTRY(_start)\nPHDRS {{ text PT_LOAD FLAGS({text_flags}); data PT_LOAD FLAGS({data_flags}); }}\n"
               f"SECTIONS {{\n  . = {base:#x};\n  .text : {{ *(.text*) }} :text\n"
               + ("" if swap else rodata) + "  . = ALIGN(0x1000);\n" + data + bss
               + (rodata.replace(":text", ":data") if swap else "")
@@ -232,6 +233,31 @@ def test_scripted_order(tmp_path):
 def test_scripted_permissions(tmp_path):
     found = _scripted(tmp_path, {}, {"data_flags": 4})
     assert any(f.what == "permissions" and f.level == "error" and ".data" in f.message for f in found)
+
+
+@needs_cc
+def test_permissions_a_section_does_not_ask_for_are_not_missed(tmp_path):
+    """GNU ld's arm64 vmlinux loads __ex_table and .rodata from an RWX segment; eld's R/RX
+    segments for them lose nothing, since the sections are neither writable nor code."""
+    found = _scripted(tmp_path, {"text_flags": 7}, {})
+    assert "permissions" not in _what(found)
+    assert "permissions" in _what(_scripted(tmp_path, {}, {"text_flags": 4}), "error")   # .text not X
+
+
+@needs_cc
+def test_alignment_of_a_booted_image_is_information(tmp_path):
+    r, n = _image(tmp_path, "ref"), _image(tmp_path, "new")
+    data = bytearray(n.read_bytes())
+    e = ELF.from_bytes(bytes(data))
+    for i, p in enumerate(e.phdrs):
+        if p.type == PT_LOAD:
+            struct.pack_into("<Q", data, _phdr_off(e, i) + 48, 0x10)      # p_align
+    n.write_bytes(bytes(data))
+    with open_elf(r) as a, open_elf(n) as b:
+        if not any(p.align > 0x10 for p in a.phdrs if p.type == PT_LOAD):
+            pytest.skip("the host ld aligns this image to less than 0x10")
+        assert ("info", "alignment") in {(f.level, f.what) for f in compare_layout(a, b, scripted=True)}
+        assert ("warn", "alignment") in {(f.level, f.what) for f in compare_layout(a, b)}
 
 
 @needs_cc
