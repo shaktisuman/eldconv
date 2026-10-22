@@ -40,11 +40,65 @@ SHIM_LD = r"""#!/bin/sh
 #    `-plugin-opt=` arguments go too; with LLVMgold.so they are kept, because eld
 #    understands LLVM's (-plugin-opt=O2, mcpu=, thinlto, ...).
 #  - Adds GNU ld's "supported targets" line to `--help` so libtool enables shared libraries.
-#  - Logs the final argv when ELDCONV_LINK_LOG is set (used by `eldconv check`).
+#  - Logs the final argv when ELDCONV_LINK_LOG is set (used by `eldconv check`), with a
+#    copy of each response file it names.
 # ELDCONV_ELD overrides the ld.eld below; ELDCONV_KEEP_GCC_PLUGIN disables the filter.
 # (ELDCONV_KEEP_Z_HINTS likewise disables the -z hint filter further down.)
 ELD="${ELDCONV_ELD:-@ELD@}"
-if [ -z "$ELDCONV_KEEP_GCC_PLUGIN" ]; then
+# Rebuilding "$@" costs O(n) per argument, seconds on a link with thousands of inputs, so
+# the filters below only run when one pass finds something for them to remove.
+plug=0; zh=0; rsp=0; prev=
+for a in "$@"; do
+  case "$a" in
+    *liblto_plugin*|*LLVMgold*) plug=1;;
+    -zibt|-zshstk|-zibtplt|-zcet-report=*|-zorigin|-zrewrite-endbr) zh=1;;
+    @?*) rsp=1;;
+  esac
+  if [ "$prev" = -z ]; then
+    case "$a" in ibt|shstk|ibtplt|cet-report=*|origin|rewrite-endbr) zh=1;; esac
+  fi
+  prev="$a"
+done
+kp=1; [ -z "$ELDCONV_KEEP_GCC_PLUGIN" ] || { kp=0; plug=0; }
+kz=1; [ -z "$ELDCONV_KEEP_Z_HINTS" ] || { kz=0; zh=0; }
+# GCC hands collect2's arguments to ld in a response file (`@/tmp/ccXXXXXX`, one argument
+# per line) when it was given one itself, so the same filters apply inside it: a filtered
+# copy replaces it, and ld.eld runs as a child so that the copy can be removed afterwards.
+tmp=
+if [ $rsp = 1 ] && [ $((kp + kz)) -gt 0 ]; then
+  n=$#; i=0
+  while [ $i -lt $n ]; do
+    a="$1"; shift; i=$((i+1))
+    case "$a" in
+      @?*)
+        f="${a#@}"
+        if [ -f "$f" ] && [ -r "$f" ] && { [ -n "$tmp" ] || tmp=$(mktemp -d "${TMPDIR:-/tmp}/eldconv.XXXXXX"); }; then
+          t="$tmp/$i.rsp"
+          if awk -v plug=$kp -v z=$kz '
+              { a[NR] = $0 }
+              END {
+                gcc = 0
+                for (i = 1; i <= NR; i++) if (a[i] ~ /liblto_plugin/) gcc = 1
+                hint = "^(ibt|shstk|ibtplt|cet-report=.*|origin|rewrite-endbr)$"
+                for (i = 1; i <= NR; i++) {
+                  x = a[i]
+                  if (plug && (x == "-plugin" || x == "--plugin") && i < NR && a[i+1] ~ /liblto_plugin|LLVMgold/) { i++; drop = 1; continue }
+                  if (plug && x ~ /^--?plugin=.*(liblto_plugin|LLVMgold)/) { drop = 1; continue }
+                  if (plug && gcc && x ~ /^--?plugin-opt=/) { drop = 1; continue }
+                  if (z && x == "-z" && i < NR && a[i+1] ~ hint) { i++; drop = 1; continue }
+                  if (z && x ~ /^-z./ && substr(x, 3) ~ hint) { drop = 1; continue }
+                  print x
+                }
+                exit !drop
+              }' "$f" > "$t"; then
+            a="@$t"
+          fi
+        fi;;
+    esac
+    set -- "$@" "$a"
+  done
+fi
+if [ $plug = 1 ]; then
   gccplugin=0
   for a in "$@"; do
     case "$a" in *liblto_plugin*) gccplugin=1;; esac
@@ -68,7 +122,7 @@ fi
 #  - Drops `-z` hints eld rejects and that are safe to lose (x86 CET, DF_ORIGIN, ...).
 #    Build systems that probe for them at build time compose them into LDFLAGS where
 #    no static conversion can see them. ELDCONV_KEEP_Z_HINTS disables the filter.
-if [ -z "$ELDCONV_KEEP_Z_HINTS" ]; then
+if [ $zh = 1 ]; then
   skip=0; n=$#; i=0
   while [ $i -lt $n ]; do
     a="$1"; shift; i=$((i+1))
@@ -83,10 +137,23 @@ if [ -z "$ELDCONV_KEEP_Z_HINTS" ]; then
   done
 fi
 if [ -n "$ELDCONV_LINK_LOG" ]; then
+  rec=
+  if [ $rsp = 1 ]; then
+    # `check` reads the link from its response files, which the driver deletes once the
+    # link is done: log a copy of each
+    d="$ELDCONV_LINK_LOG.rsp"
+    mkdir -p "$d"
+    rec=$(for a in "$@"; do
+      case "$a" in
+        @?*) if [ -f "${a#@}" ] && c=$(mktemp "$d/XXXXXXXX") && cp "${a#@}" "$c"; then a="@$c"; fi;;
+      esac
+      printf '%s\037' "$a"
+    done)
+  elif [ $# -gt 0 ]; then
+    rec=$(printf '%s\037' "$@")
+  fi
   # one record, one write(): parallel links (make -j) must not interleave their lines
-  us=$(printf '\037'); rec="$PWD$us"
-  for a in "$@"; do rec="$rec$a$us"; done
-  printf '%s\n' "$rec" >> "$ELDCONV_LINK_LOG"
+  printf '%s\037%s\n' "$PWD" "$rec" >> "$ELDCONV_LINK_LOG"
 fi
 # libtool enables shared libraries only if `ld --help` mentions ": supported targets: ... elf"
 # (GNU ld's wording). eld's help does not say so, and libtool would silently build static
@@ -95,9 +162,15 @@ for a in "$@"; do
   if [ "$a" = "--help" ]; then
     "$ELD" "$@"; rc=$?
     echo "$0: supported targets: elf64-little elf64-big elf32-little elf32-big"
+    [ -z "$tmp" ] || rm -rf "$tmp"
     exit $rc
   fi
 done
+if [ -n "$tmp" ]; then
+  "$ELD" "$@"; rc=$?
+  rm -rf "$tmp"
+  exit $rc
+fi
 exec "$ELD" "$@"
 """
 
@@ -194,13 +267,19 @@ BUILD_SH_GN = """#!/bin/sh
 # Generated by eldconv -- configure & build a GN/Ninja tree with eld.
 set -eu
 SRC="$(cd "$(dirname "$0")" && pwd)"
+# OUT is relative to the tree, wherever this script is run from: gn reads a relative out
+# dir against the current directory
 OUT="${1:-out/eld}"
 ELD="${ELDCONV_ELD:-@ELD@}"
 export ELDCONV_ELD="$ELD"
-mkdir -p "$SRC/$OUT"
-cat "$SRC/@ARGS@" >> "$SRC/$OUT/args.gn"
+cd "$SRC"
+mkdir -p "$OUT"
+# once: a second run must not append the same args again
+if ! grep -qxF '@MARK@' "$OUT/args.gn" 2>/dev/null; then
+  cat "@ARGS@" >> "$OUT/args.gn"
+fi
 gn gen "$OUT" --root="$SRC"
-ninja -C "$SRC/$OUT"
+ninja -C "$OUT"
 """
 
 BUILD_SH_NINJA = """#!/bin/sh
@@ -632,7 +711,8 @@ def _convert(src: Path, dst: Path, final: Path, eld: str, source_linker: Optiona
     if info.system == "gn":
         _write(dst / ARGS_GN_FILE, ARGS_GN)
         _write(dst / BUILD_SCRIPT, BUILD_SH_GN.replace("@ELD@", eld)
-               .replace("@ARGS@", ARGS_GN_FILE), executable=True)
+               .replace("@ARGS@", ARGS_GN_FILE)
+               .replace("@MARK@", ARGS_GN.split("\n", 1)[0]), executable=True)
         report.generated += [ARGS_GN_FILE, BUILD_SCRIPT]
     elif info.system == "ninja":
         # A standalone ninja tree has no configure step: the shim is already in

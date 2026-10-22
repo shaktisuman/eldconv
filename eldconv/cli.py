@@ -279,10 +279,10 @@ def _protect_flag_operands(argv: List[str]) -> List[str]:
     while i < len(argv):
         a = argv[i]
         if (a in ("--raw", "-h", "--help", "-v", "--verbose", "-vv")
-                or a.startswith(("--source-linker=", "--eld-surface="))):
+                or a.startswith(("--source-linker=", "--eld-surface=", "--eld="))):
             opts.append(a)
             i += 1
-        elif a in ("--source-linker", "--eld-surface"):
+        elif a in ("--source-linker", "--eld-surface", "--eld"):
             opts.extend(argv[i:i + 2])
             i += 2
         else:

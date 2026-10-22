@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import struct
@@ -158,6 +159,32 @@ def find_eld(explicit: Optional[str] = None) -> Optional[str]:
     return None
 
 
+def expand_response_files(args: List[str], cwd: str, depth: int = 0) -> List[str]:
+    """Replace each `@file` that names a readable file with the arguments it holds.
+
+    GCC writes one argument per line with backslash escapes and clang quotes them, which
+    is what shlex reads; a file it cannot tokenise is split on whitespace. A missing file
+    stays an `@file` argument, as the linker itself would treat it.
+    """
+    out: List[str] = []
+    for a in args:
+        if not a.startswith("@") or len(a) == 1 or depth > 8:
+            out.append(a)
+            continue
+        p = Path(a[1:]) if Path(a[1:]).is_absolute() else Path(cwd) / a[1:]
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:
+            out.append(a)
+            continue
+        try:
+            inner = shlex.split(text, posix=True)
+        except ValueError:
+            inner = text.split()
+        out.extend(expand_response_files(inner, cwd, depth + 1))
+    return out
+
+
 def parse_link_log(path: Path) -> List[LinkInvocation]:
     invs: List[LinkInvocation] = []
     if not Path(path).exists():
@@ -170,7 +197,10 @@ def parse_link_log(path: Path) -> List[LinkInvocation]:
             parts = parts[:-1]
         if not parts:
             continue
-        invs.append(LinkInvocation(parts[0], parts[1:]))
+        args = parts[1:]
+        if any(a.startswith("@") for a in args):
+            args = expand_response_files(args, parts[0])
+        invs.append(LinkInvocation(parts[0], args))
     return invs
 
 
@@ -851,6 +881,9 @@ def run_check(dst: Path, eld: Optional[str] = None, build_dir: Optional[Path] = 
                 fh.write(args_src.read_text())
     if log_path.exists():
         log_path.unlink()
+    rsp_copies = Path(f"{log_path}.rsp")   # the shim's copies of response files
+    if rsp_copies.is_dir() and not rsp_copies.is_symlink():
+        shutil.rmtree(rsp_copies)
     out, err, rc = "", "", 0
     started = time.time() - 1
     log.step("building")

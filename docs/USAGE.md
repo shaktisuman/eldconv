@@ -20,6 +20,8 @@ it. The shim:
 - removes GCC's `-plugin liblto_plugin.so` arguments, which eld cannot load,
 - removes a few `-z` hints eld rejects and that are safe to lose (`-z ibt`, `-z shstk`,
   `-z cet-report=…`, `-z origin`),
+- applies both filters inside response files too (`@/tmp/ccXXXXXX`, which GCC hands to `ld` when it
+  was given an `@file` itself), by passing eld a filtered copy,
 - adds GNU ld's "supported targets" line to `--help`, because libtool otherwise builds only static libraries.
 
 **The eld surface.** eld ignores unknown options with a warning. eldconv therefore filters every
@@ -253,7 +255,9 @@ Diagnostics go to stderr, the converted flags to stdout.
 
 Results are printed as JSON and saved to `<build dir>/eldconv-check.json`. Every command's full
 output is in `<build dir>/eldconv-build.log` (printed as it arrives with `-v`; the JSON keeps only
-the last 4000 characters). The shim log is `<build dir>/eld-link.log`.
+the last 4000 characters). The shim log is `<build dir>/eld-link.log`, with copies of the response
+files the links used in `<build dir>/eld-link.log.rsp/` (the compiler deletes its own); `check`
+reads a link's arguments from them.
 
 ### `eldconv flags "FLAGS"`
 
@@ -312,7 +316,7 @@ Typical `error` items: `--icf=*` (size grows), `-z pack-relative-relocs` (no REL
 | variable | used by | meaning |
 |---|---|---|
 | `ELDCONV_ELD` | shim, `build-eld.sh` | path to ld.eld at build time (overrides the baked-in path) |
-| `ELDCONV_LINK_LOG` | shim | file that receives one record per link (set by `check`) |
+| `ELDCONV_LINK_LOG` | shim | file that receives one record per link, plus `<file>.rsp/` for response files (set by `check`) |
 | `ELDCONV_KEEP_GCC_PLUGIN` | shim | do not strip GCC's LTO plugin arguments |
 | `ELDCONV_KEEP_Z_HINTS` | shim | do not strip `-z ibt/shstk/cet-report/origin` |
 | `ELDCONV_TEST_ELD` | tests | run the e2e tests against a real ld.eld |

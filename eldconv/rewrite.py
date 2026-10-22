@@ -8,7 +8,7 @@ import re
 import shlex
 from typing import List, Optional, Tuple
 
-from .flags import (LinkArg, emit_linker_item, emit_raw, emit_wl, emit_xlinker,
+from .flags import (VALUE_FLAGS, LinkArg, emit_linker_item, emit_raw, emit_wl, emit_xlinker,
                     parse_linker_item, parse_raw, parse_wl, parse_xlinker)
 from .mapping import Action, Diag, convert_args, find_rule
 
@@ -22,7 +22,8 @@ WL_RE = re.compile(r"-Wl," + _TOK)
 DYLD_PLACEHOLDERS = ("loader_path", "executable_path", "rpath")
 # `$@` (make's target) and `$$@` are not response files: exclude a preceding "$".
 RESPONSE_RE = re.compile(r"(?<![\w=$(\{])@(" + _TOK + r")")
-XLINKER_RE = re.compile(r"(?:-Xlinker\s+" + _TOK + r"\s*)+")
+XLINKER_RE = re.compile(r"(?:-Xlinker\s+(?!\\(?:\s|$))" + _TOK + r"\s*)+")
+XLINKER_TAIL_RE = re.compile(r"(?<![\w-])-Xlinker[ \t]+\\(?=\r?$)")
 LINKER_SHELL_RE = re.compile(r"LINKER:SHELL:[^\"'();]+")
 LINKER_RE = re.compile(r"LINKER:(?!SHELL:)" + _TOK)
 FUSE_RE = re.compile(r"(?<![\w-])-fuse-ld=" + _TOK)
@@ -101,8 +102,18 @@ class Rewriter:
     """Stateful text rewriter for one source linker."""
 
     def __init__(self, linker: str, bare_requires_context: bool = True,
-                 strip_empty_quotes: bool = False, shell: bool = False):
+                 strip_empty_quotes: bool = False, shell: bool = False,
+                 continuations: bool = False):
         self.linker = linker
+        # Make and shell join a line ending in `\` to the next one: a continued
+        # `LDFLAGS = ... \` keeps its linker context on the following lines, and
+        # `-Xlinker \` takes its value from the start of the next line.
+        self.continuations = continuations
+        self._cont_ctx = False
+        self._cont_xlinker = False
+        # 1-based lines whose trailing `-Xlinker \` lost its value to the conversion;
+        # the caller, which holds the finished lines, removes it (see drop_dangling_xlinker)
+        self.dangling_xlinker: List[int] = []
         # Shell-ish input (configure.ac, Makefile.am recipes): a flag that is a
         # case pattern (`-fuse-ld=*)`, `-fuse-ld=lld|-fuse-ld=gold)`) is a test,
         # not a use, and removing it would break the script.
@@ -202,8 +213,34 @@ class Rewriter:
         self._text = text
         return rx.sub(self._guarded(fn, text), text)
 
+    def _xlinker_head(self, text: str, file, line) -> str:
+        """The first word of a line that continues `-Xlinker` + backslash: its value."""
+        m = re.match(r"([ \t]*)(" + _TOK + r")", text)
+        if not m or m.group(2) == "\\":
+            return text
+        tok = m.group(2)
+        if tok in VALUE_FLAGS or not tok.startswith("-"):
+            return text      # its own value follows in another -Xlinker; leave the pair alone
+        args, d = convert_args(parse_xlinker([tok]), self.linker)
+        self._note(d, file, line)
+        parts = emit_raw(args)
+        if not parts:
+            if line is not None:
+                self.dangling_xlinker.append(line)
+            return m.group(1) + text[m.end():].lstrip(" \t")
+        return m.group(1) + " -Xlinker ".join(parts) + text[m.end():]
+
     # -- public --------------------------------------------------------------
     def rewrite_line(self, text: str, file: Optional[str] = None, line: Optional[int] = None) -> str:
+        cont_ctx = False
+        if self.continuations:
+            cont_ctx, cont_x = self._cont_ctx, self._cont_xlinker
+            body = text.rstrip("\r").rstrip()
+            continued = body.endswith("\\")
+            self._cont_ctx = continued and (cont_ctx or bool(LINK_CONTEXT_RE.search(text)))
+            self._cont_xlinker = continued and bool(XLINKER_TAIL_RE.search(body))
+            if cont_x:
+                text = self._xlinker_head(text, file, line)
         if "@" in text and ("-Wl," in text or "-Xlinker" in text or LINK_CONTEXT_RE.search(text)):
             for m in RESPONSE_RE.finditer(text):
                 if m.group(1).split("/")[0] in DYLD_PLACEHOLDERS:
@@ -240,7 +277,7 @@ class Rewriter:
         text = self._sub(CALL_OPTION_RE, lambda m: self._call_option(m, file, line), text)
         text = self._sub(FUSE_RE, lambda m: self._sel(m, file, line), text)
         text = self._sub(LDPATH_RE, lambda m: self._sel(m, file, line), text)
-        if not self.bare_requires_context or LINK_CONTEXT_RE.search(orig):
+        if not self.bare_requires_context or cont_ctx or LINK_CONTEXT_RE.search(orig):
             text = self._sub(BARE_RE, lambda m: self._bare(m, file, line), text)
         if text != orig:
             if self.strip_empty_quotes:
@@ -266,7 +303,16 @@ class Rewriter:
         out = []
         for i, ln in enumerate(text.split("\n"), 1):
             out.append(self.rewrite_line(ln, file, i))
+        self.drop_dangling_xlinker(out)
         return "\n".join(out)
+
+    def drop_dangling_xlinker(self, lines: List[str]) -> None:
+        """Remove `-Xlinker` from the end of the line before each line whose first word,
+        that -Xlinker's value, the conversion dropped."""
+        for n in self.dangling_xlinker:
+            if 2 <= n <= len(lines):
+                lines[n - 2] = XLINKER_TAIL_RE.sub(r"\\", lines[n - 2])
+        self.dangling_xlinker = []
 
 
 def convert_driver_string(s: str, linker: str) -> Tuple[str, List[Diag]]:
