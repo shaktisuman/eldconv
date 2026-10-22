@@ -23,7 +23,7 @@ AUTOMAKE_SUFFIXES = (".am", ".in")
 
 
 def rewrite_configure_ac(text: str, linker: str, file: str = "configure.ac") -> Tuple[str, List[Diag]]:
-    rw = Rewriter(linker, shell=True)
+    rw = Rewriter(linker, shell=True, continuations=True)
     return rw.rewrite_text(text, file), rw.diags
 
 
