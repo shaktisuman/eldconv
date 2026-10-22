@@ -21,7 +21,7 @@ from typing import List
 
 from . import LINKERS, __version__
 from .audit import audit
-from .checker import run_check
+from .checker import default_jobs, run_check
 from .log import Log
 from .detect import SYSTEMS, detect
 from .generator import convert_project
@@ -93,16 +93,13 @@ def cmd_convert(a) -> int:
           f"{len(rep.errors)} error(s), {len(rep.warnings)} warning(s); see {a.dst}/eldconv-report.md")
     rc = 1 if (a.strict and rep.errors) else 0
     if a.check and rc == 0:
-        rc = cmd_check(argparse.Namespace(dst=a.dst, eld=a.eld, build_dir=None, jobs=a.jobs,
-                                          dry_run=False, cmake_arg=a.cmake_arg, no_probe=False,
-                                          no_clean=False, build_arg=getattr(a, "build_arg", None),
-                                          timeout=a.timeout, verbose=getattr(a, "verbose", 0)))
+        rc = cmd_check(argparse.Namespace(**{**vars(a), "dry_run": False}))
     return rc
 
 
 def cmd_check(a) -> int:
     res = run_check(Path(a.dst), eld=a.eld, build_dir=Path(a.build_dir) if a.build_dir else None,
-                    jobs=a.jobs, dry_run=a.dry_run, extra_cmake=a.cmake_arg or [], probe=not a.no_probe,
+                    jobs=a.jobs or default_jobs(), dry_run=a.dry_run, extra_cmake=a.cmake_arg or [], probe=not a.no_probe,
                     clean=not a.no_clean, build_args=a.build_arg or [],
                     timeout=getattr(a, "timeout", None), pre_build=getattr(a, "pre_build", None) or [],
                     allow_unresolved_data=getattr(a, "allow_unresolved_data", False),
@@ -118,6 +115,8 @@ def cmd_check(a) -> int:
         return 2    # usage/input error, like `audit` and `surface`
     if not res.ok and res.stderr_tail:
         print("--- stderr tail ---\n" + res.stderr_tail, file=sys.stderr)
+    if not res.ok and res.build_log:
+        print(f"full build output: {res.build_log}", file=sys.stderr)
     print("CHECK " + ("PASSED" if res.ok else "FAILED"))
     return 0 if res.ok else 1
 
@@ -187,13 +186,39 @@ def build_parser() -> argparse.ArgumentParser:
                              "scanned and every flag decision")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    # what `check` builds with; `convert --check` takes the same options
+    chk = argparse.ArgumentParser(add_help=False)
+    g = chk.add_argument_group("build and verify (check, convert --check)")
+    g.add_argument("--build-dir", help="where to build (default: DST/build-eld, or DST for "
+                                       "in-tree builds); relative to DST")
+    g.add_argument("--jobs", "-j", type=int, default=None,
+                   help=f"parallel build jobs (default: the number of CPUs, {default_jobs()} here)")
+    g.add_argument("--no-probe", action="store_true", help="skip `ld.eld --help` option validation")
+    g.add_argument("--build-arg", action="append", metavar="VAR=VAL",
+                   help="extra argument for the build step, e.g. ARCH=arm64 "
+                        "(repeatable); a cross build needs the same variables "
+                        "you would pass by hand")
+    g.add_argument("--pre-build", action="append", metavar="CMD",
+                   help="shell command run in DST before the build (repeatable), e.g. "
+                        "'./configure' for a project whose own configure script generates "
+                        "its Makefile; it sees the same shim environment as the build")
+    g.add_argument("--allow-unresolved-data", action="store_true",
+                   help="report undefined data symbols that got no relocation (a binary that "
+                        "links but crashes, e.g. on x86_64 with eld) as a warning, not a failure")
+    g.add_argument("--allow-ignored-version-scripts", action="store_true",
+                   help="report version scripts eld skipped (an eld built without "
+                        "ELD_ENABLE_SYMBOL_VERSIONING) as a warning, not a failure")
+    g.add_argument("--no-clean", action="store_true",
+                   help="build incrementally (an up-to-date tree then verifies nothing)")
+    g.add_argument("--timeout", type=int, default=None, help="per-command timeout in seconds")
+
     d = sub.add_parser("detect", parents=[common], help="detect build system / toolchain / linker")
     d.add_argument("src")
     d.add_argument("--source-linker", choices=LINKERS)
     d.add_argument("--build-system", choices=SYSTEMS, help="override the detected build system")
     d.set_defaults(fn=cmd_detect)
 
-    c = sub.add_parser("convert", parents=[common], help="generate an eld-linked copy of SRC in DST")
+    c = sub.add_parser("convert", parents=[common, chk], help="generate an eld-linked copy of SRC in DST")
     c.add_argument("src")
     c.add_argument("dst")
     c.add_argument("--eld", default="ld.eld", help="path to ld.eld (default: ld.eld on PATH)")
@@ -204,43 +229,20 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--cmake-arg", action="append", help="extra -D args for configure")
     c.add_argument("--force", action="store_true", help="replace DST if it exists")
     c.add_argument("--check", action="store_true", help="run the checker after converting")
-    c.add_argument("--jobs", "-j", type=int, default=4)
     c.add_argument("--quiet", "-q", action="store_true")
     c.add_argument("--strict", action="store_true",
                    help="exit 1 if the conversion reported any error (semantics lost)")
-    c.add_argument("--timeout", type=int, default=None, help="--check: per-command timeout in seconds")
-    c.add_argument("--build-arg", action="append", metavar="ARG", help="--check: see `check --build-arg`")
     c.add_argument("--eld-surface", metavar="FILE|auto|bundled|none",
                    help="what eld accepts: the bundled snapshot (default), auto (probe --eld "
                         "once, then cache), a file from `eldconv surface`, or none to trust "
                         "the rule table alone")
     c.set_defaults(fn=cmd_convert)
 
-    k = sub.add_parser("check", parents=[common], help="build DST with eld and verify")
+    k = sub.add_parser("check", parents=[common, chk], help="build DST with eld and verify")
     k.add_argument("dst")
     k.add_argument("--eld")
-    k.add_argument("--build-dir")
-    k.add_argument("--jobs", "-j", type=int, default=4)
     k.add_argument("--cmake-arg", action="append")
     k.add_argument("--dry-run", action="store_true", help="print the commands only")
-    k.add_argument("--no-probe", action="store_true", help="skip `ld.eld --help` option validation")
-    k.add_argument("--build-arg", action="append", metavar="VAR=VAL",
-                   help="extra argument for the build step, e.g. ARCH=arm64 "
-                        "(repeatable); a cross build needs the same variables "
-                        "you would pass by hand")
-    k.add_argument("--pre-build", action="append", metavar="CMD",
-                   help="shell command run in DST before the build (repeatable), e.g. "
-                        "'./configure' for a project whose own configure script generates "
-                        "its Makefile; it sees the same shim environment as the build")
-    k.add_argument("--allow-unresolved-data", action="store_true",
-                   help="report undefined data symbols that got no relocation (a binary that "
-                        "links but crashes, e.g. on x86_64 with eld) as a warning, not a failure")
-    k.add_argument("--allow-ignored-version-scripts", action="store_true",
-                   help="report version scripts eld skipped (an eld built without "
-                        "ELD_ENABLE_SYMBOL_VERSIONING) as a warning, not a failure")
-    k.add_argument("--no-clean", action="store_true",
-                   help="build incrementally (an up-to-date tree then verifies nothing)")
-    k.add_argument("--timeout", type=int, default=None, help="per-command timeout in seconds")
     k.set_defaults(fn=cmd_check)
 
     au = sub.add_parser("audit", parents=[common],
