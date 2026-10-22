@@ -97,6 +97,11 @@ class Log:
             self._counts["unchanged"] += 1
             self.detail(f"unchanged {rel}")
 
+    def build_output(self, line: str) -> None:
+        """One line of build output, as it arrives (-v)."""
+        if self.level >= VERBOSE:
+            print(self._paint(f"   | {line}", "2"), file=self.stream, flush=True)
+
     def command(self, argv: Iterable[str], cwd: Optional[str] = None) -> None:
         line = " ".join(str(a) for a in argv)
         self.info(f"run: {line}" + (f"   (cwd {cwd})" if cwd else ""))

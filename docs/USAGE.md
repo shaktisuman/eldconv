@@ -232,8 +232,7 @@ Diagnostics go to stderr, the converted flags to stdout.
 | `--eld-surface X` | `bundled` (default), `auto` (probe `--eld`, cache it), a file from `eldconv surface`, or `none` |
 | `--force` | replace `DST`; refused unless `DST` is empty or contains `eldconv-report.json` |
 | `--strict` | exit 1 if the conversion reported any `error` diagnostic |
-| `--check` | run `check` afterwards (takes `--jobs`, `--timeout`, `--build-arg`) |
-| `-j N`, `--timeout S` | for `--check` |
+| `--check` | run `check` afterwards; it takes every `check` option below except `--eld`, `--cmake-arg` (shared with the conversion) and `--dry-run` |
 | `-q` | do not print diagnostics (snapshot warnings and `auto` progress still go to stderr) |
 | `-v`, `-vv` | explain decisions / list every file and flag |
 
@@ -251,13 +250,14 @@ Diagnostics go to stderr, the converted flags to stdout.
 | `--no-probe` | skip validating flags against `ld.eld --help` |
 | `--allow-unresolved-data` | report binaries with undefined data symbols and no relocation as warnings instead of failures |
 | `--allow-ignored-version-scripts` | report version scripts eld skipped as warnings instead of failures |
-| `--timeout S` | per-command timeout |
-| `-j N` | parallel jobs |
+| `--timeout S` | per-command timeout; it stops the whole build, not only its top command |
+| `-j N` | parallel jobs (default: the number of CPUs) |
 
-Results are printed as JSON and saved to `<build dir>/eldconv-check.json`. The shim log is
-`<build dir>/eld-link.log`, with copies of the response files the links used in
-`<build dir>/eld-link.log.rsp/` (the compiler deletes its own); `check` reads a link's arguments
-from them.
+Results are printed as JSON and saved to `<build dir>/eldconv-check.json`. Every command's full
+output is in `<build dir>/eldconv-build.log` (printed as it arrives with `-v`; the JSON keeps only
+the last 4000 characters). The shim log is `<build dir>/eld-link.log`, with copies of the response
+files the links used in `<build dir>/eld-link.log.rsp/` (the compiler deletes its own); `check`
+reads a link's arguments from them.
 
 ### `eldconv flags "FLAGS"`
 
@@ -373,5 +373,6 @@ The generated shim handles this; make sure `configure` runs with `COMPILER_PATH`
 **`LD := ld` used before `eld.mk`**: handled; the rewritten assignment falls back to the shim path
 until `eld.mk` defines it.
 
-**Check hangs or is slow**: use `--timeout`, `--jobs`, and `--build-arg <target>` to build something
-narrower than the default target.
+**Check hangs or is slow**: run it with `-v` to watch the build, or follow
+`<build dir>/eldconv-build.log`; use `--timeout`, `--jobs`, and `--build-arg <target>` to build
+something narrower than the default target.

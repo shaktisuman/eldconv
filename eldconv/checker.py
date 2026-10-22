@@ -21,6 +21,7 @@ from .generator import ARGS_GN_FILE, MK_FILE, SHIM_DIR, TOOLCHAIN_FILE, load_rep
 
 CHECK_REPORT = "eldconv-check.json"
 LOG_NAME = "eld-link.log"
+BUILD_LOG = "eldconv-build.log"
 Runner = Callable[..., subprocess.CompletedProcess]
 
 # flags eld's --help will not list verbatim but that are always accepted
@@ -131,10 +132,12 @@ class CheckResult:
     problems: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     tentative_confirmed: Dict[str, bool] = field(default_factory=dict)
+    build_log: Optional[str] = None     # every command's full output
 
     def as_dict(self) -> dict:
         return {"ok": self.ok, "eld": self.eld, "eld_version": self.eld_version,
-                "build_dir": self.build_dir, "commands": self.commands, "returncode": self.returncode,
+                "build_dir": self.build_dir, "build_log": self.build_log,
+                "commands": self.commands, "returncode": self.returncode,
                 "invocations": self.invocations, "probes": self.probes, "trycompiles": self.trycompiles,
                 "outputs": self.outputs,
                 "unknown_flags": self.unknown_flags, "ignored_flags": self.ignored_flags,
@@ -699,6 +702,63 @@ def build_commands(dst: Path, build_dir: Path, eld: str, jobs: int, extra_cmake:
 
 # --------------------------------------------------------------------------- driver
 
+def default_jobs() -> int:
+    return os.cpu_count() or 4
+
+
+def _run_streaming(cmd: List[str], env: dict, cwd: str, timeout: Optional[int], sink, echo) \
+        -> subprocess.CompletedProcess:
+    """Run `cmd`, writing its output to `sink` as it comes (and each line to `echo`, if
+    given) while collecting it like `subprocess.run(capture_output=True)` does.
+
+    A kernel build runs for many minutes: `check` must not sit silent all that time, and a
+    failure needs more than the tail it keeps in its report.
+    """
+    import signal
+    import threading
+    # its own process group, so that a timeout (or Ctrl-C) stops the whole build: killing
+    # only `make` leaves its children running and holding the output pipes open
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=cwd,
+                            text=True, errors="replace", bufsize=1, start_new_session=True)
+
+    def kill_group():
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.wait()
+    chunks: Dict[str, List[str]] = {"out": [], "err": []}
+    lock = threading.Lock()
+
+    def pump(stream, key):
+        for line in stream:
+            chunks[key].append(line)
+            with lock:
+                sink.write(line)
+                if echo:
+                    echo(line.rstrip("\n"))
+        stream.close()
+
+    threads = [threading.Thread(target=pump, args=(proc.stdout, "out"), daemon=True),
+               threading.Thread(target=pump, args=(proc.stderr, "err"), daemon=True)]
+    for t in threads:
+        t.start()
+    try:
+        rc = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_group()
+        for t in threads:
+            t.join(5)
+        raise subprocess.TimeoutExpired(cmd, timeout, "".join(chunks["out"]), "".join(chunks["err"]))
+    except BaseException:
+        kill_group()
+        raise
+    for t in threads:
+        t.join()
+    sink.flush()
+    return subprocess.CompletedProcess(cmd, rc, "".join(chunks["out"]), "".join(chunks["err"]))
+
+
 def _make_vars_only(build_args: Optional[List[str]]) -> List[str]:
     """The VAR=VAL subset of --build-arg, safe to also hand to `make clean`.
 
@@ -731,14 +791,19 @@ def clean_commands(dst: Path, build_dir: Path, build_args: Optional[List[str]] =
     return []  # cmake: the build dir is removed outright
 
 
-def run_check(dst: Path, eld: Optional[str] = None, build_dir: Optional[Path] = None, jobs: int = 4,
-              dry_run: bool = False, extra_cmake: Optional[List[str]] = None,
-              runner: Runner = subprocess.run, probe: bool = True, clean: bool = True,
+def run_check(dst: Path, eld: Optional[str] = None, build_dir: Optional[Path] = None,
+              jobs: Optional[int] = None, dry_run: bool = False, extra_cmake: Optional[List[str]] = None,
+              runner: Optional[Runner] = None, probe: bool = True, clean: bool = True,
               build_args: Optional[List[str]] = None, timeout: Optional[int] = None,
               pre_build: Optional[List[str]] = None, allow_unresolved_data: bool = False,
               allow_ignored_version_scripts: bool = False,
               log: Log = NULL_LOG) -> CheckResult:
     dst = Path(dst).resolve()
+    jobs = jobs or default_jobs()
+    # The build streams its output into a log file; a runner passed in (the tests' fakes)
+    # is called like subprocess.run instead, and its output written to the log afterwards.
+    stream = runner is None
+    runner = runner or subprocess.run
     res = CheckResult()
     report = load_report(dst) or {}
     log.step(f"checking {dst}")
@@ -822,11 +887,21 @@ def run_check(dst: Path, eld: Optional[str] = None, build_dir: Optional[Path] = 
     out, err, rc = "", "", 0
     started = time.time() - 1
     log.step("building")
+    build_log = build_dir / BUILD_LOG
+    res.build_log = str(build_log)
+    sink = open(build_log, "w", errors="replace")
+    echo = (lambda line: log.build_output(line)) if log.enabled else None
     for cmd in res.commands:
         log.command(cmd, str(dst))
+        sink.write(f"$ {' '.join(cmd)}\n")
+        sink.flush()
         try:
-            kw = {"timeout": timeout} if timeout else {}
-            r = runner(cmd, capture_output=True, text=True, env=env, cwd=str(dst), **kw)
+            if stream:
+                r = _run_streaming(cmd, env, str(dst), timeout, sink, echo)
+            else:
+                kw = {"timeout": timeout} if timeout else {}
+                r = runner(cmd, capture_output=True, text=True, env=env, cwd=str(dst), **kw)
+                sink.write((r.stdout or "") + (r.stderr or ""))
         except FileNotFoundError:
             res.problems.append(f"build tool not found: {cmd[0]} (install it or put it on PATH)")
             log.error(res.problems[-1])
@@ -835,16 +910,23 @@ def run_check(dst: Path, eld: Optional[str] = None, build_dir: Optional[Path] = 
         except subprocess.TimeoutExpired as e:
             res.problems.append(f"timed out after {timeout}s: {' '.join(cmd)}")
             log.error(res.problems[-1])
-            out += (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-            err += (e.stderr or b"").decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+            o = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+            r_err = (e.stderr or b"").decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+            if not stream:
+                sink.write(o + r_err)
+            sink.write(f"[timed out after {timeout}s]\n")
+            out += o
+            err += r_err
             rc = 124
             break
         log.info(f"exit {r.returncode}")
+        sink.write(f"[exit {r.returncode}]\n")
         out += r.stdout or ""
         err += r.stderr or ""
         rc = r.returncode
         if rc != 0:
             break
+    sink.close()
     res.returncode = rc
     res.stdout_tail = out[-4000:]
     res.stderr_tail = err[-4000:]
