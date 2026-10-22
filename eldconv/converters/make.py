@@ -30,7 +30,7 @@ def rewrite_make_text(text: str, linker: str, file: str = "Makefile", eld_mk_rel
     `add_include` appends the `include eld.mk` block. Only entry-point makefiles
     and ones that now reference $(ELD_SHIM_LD) need it -- see needs_include().
     """
-    rw = Rewriter(linker, shell=shell)
+    rw = Rewriter(linker, shell=shell, continuations=True)
     out: List[str] = []
     for i, ln in enumerate(text.split("\n"), 1):
         m = LD_ASSIGN_RE.match(ln)
@@ -57,6 +57,7 @@ def rewrite_make_text(text: str, linker: str, file: str = "Makefile", eld_mk_rel
                 return m.group(1) + "$(ELD_SHIM_LD)"
             ln = RECIPE_LD_RE.sub(_direct, ln)
         out.append(rw.rewrite_line(ln, file, i))
+    rw.drop_dangling_xlinker(out)
     new = "\n".join(out)
     if add_include and INCLUDE_MARK not in new:
         if not new.endswith("\n"):
