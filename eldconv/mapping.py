@@ -354,36 +354,46 @@ def _eld_label() -> str:
     return f"eld {m.group(1)}" if m else "this eld"
 
 
-def _surface_verdict(arg: LinkArg) -> Optional[bool]:
+def _surface_verdict(arg: LinkArg, target: Optional[str] = None) -> Optional[bool]:
     from .surface import active
     s = active()
-    return s.accepts(arg.name, arg.value) if s else None
+    return s.accepts(arg.name, arg.value, target) if s else None
 
 
-def _unaccepted(arg: LinkArg, spelled: str, why: str = "") -> Tuple[List[LinkArg], List[Diag]]:
+def _unaccepted(arg: LinkArg, spelled: str, target: Optional[str] = None) -> Tuple[List[LinkArg], List[Diag]]:
+    from .surface import active
+    s = active()
+    others = (s.accepting(arg.name, arg.value) or []) if s and target else []
+    if others:
+        # The backends that take it are the ones it means something to (ARM errata,
+        # veneers, small data, relaxation): for this target there is nothing to lose.
+        return [], [Diag("warn", spelled,
+                         f"dropped: {_eld_label()} accepts it only for {', '.join(others)} links; "
+                         f"it would ignore it in {target} links (\"Unrecognized option\")")]
     level = drop_severity(arg)
     tail = "" if level == "warn" else "; its effect is lost"
     return [], [Diag(level, spelled,
                      f"dropped: not accepted by {_eld_label()}, which would ignore it"
-                     f" (\"Unrecognized option\"){tail}{why}")]
+                     f" (\"Unrecognized option\"){tail}")]
 
 
-def convert_arg(arg: LinkArg, linker: str) -> Tuple[List[LinkArg], List[Diag]]:
+def convert_arg(arg: LinkArg, linker: str, target: Optional[str] = None) -> Tuple[List[LinkArg], List[Diag]]:
     """Convert one linker option. Returns (replacement args, diagnostics).
 
     The rule table says what an option *means* for eld; the active eld surface
-    (surface.py) says whether this eld accepts it at all. An option the table
-    would keep -- or does not know -- but eld rejects is dropped and reported,
-    because eld would otherwise ignore it with only a warning.
+    (surface.py) says whether this eld accepts it at all -- for `target` when
+    that is known, else for any target. An option the table would keep -- or
+    does not know -- but eld rejects is dropped and reported, because eld would
+    otherwise ignore it with only a warning.
     """
     if arg.positional:
         return [arg], []
     rule = find_rule(arg, linker)
     spelled = _spelling(arg)
     if rule is None:
-        verdict = _surface_verdict(arg)
+        verdict = _surface_verdict(arg, target)
         if verdict is False:
-            return _unaccepted(arg, spelled)
+            return _unaccepted(arg, spelled, target)
         if verdict is True:
             return [arg], []
         return [arg], [Diag("info", spelled, "unknown to converter; kept as-is, verify with `eldconv check`")]
@@ -391,9 +401,9 @@ def convert_arg(arg: LinkArg, linker: str) -> Tuple[List[LinkArg], List[Diag]]:
     if rule.action is Action.KEEP:
         if rule.passthrough:
             return [arg], [Diag("info", spelled, rule.note)]
-        verdict = _surface_verdict(arg)
+        verdict = _surface_verdict(arg, target)
         if verdict is False:
-            return _unaccepted(arg, spelled)
+            return _unaccepted(arg, spelled, target)
         if rule.tentative and verdict is None:
             return [arg], [Diag("info", spelled, f"kept{tent}")]
         return [arg], []
@@ -412,12 +422,25 @@ def convert_arg(arg: LinkArg, linker: str) -> Tuple[List[LinkArg], List[Diag]]:
     return [], [Diag("error", spelled, f"dropped, semantics lost: {rule.note}{tent}")]
 
 
+def link_target(args: Sequence[LinkArg]) -> Optional[str]:
+    """The target these options are for: their own `-m EMULATION` (the last one wins, as
+    in ld), else the conversion's `--target`, else None (any target)."""
+    from .surface import active_target, emulation_target
+    for a in reversed(args):
+        if a.name == "-m" and not a.positional and a.value:
+            t = emulation_target(a.value)
+            if t:
+                return t
+    return active_target()
+
+
 def convert_args(args: Sequence[LinkArg], linker: str) -> Tuple[List[LinkArg], List[Diag]]:
     from .flags import NO_VALUE_ON_NEXT, VALUE_FLAGS
     out: List[LinkArg] = []
     diags: List[Diag] = []
+    target = link_target(args)
     for a in args:
-        r, d = convert_arg(a, linker)
+        r, d = convert_arg(a, linker, target)
         out.extend(r)
         diags.extend(d)
     # An option that requires a value but has none left is worse than useless:

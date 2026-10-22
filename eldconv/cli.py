@@ -1,9 +1,9 @@
 """eldconv command line.
 
   eldconv detect  SRC
-  eldconv convert SRC DST [--eld PATH] [--source-linker bfd|lld|gold|mold] [--check] [--strict]
+  eldconv convert SRC DST [--eld PATH] [--source-linker bfd|lld|gold|mold] [--target ARCH] [--check] [--strict]
   eldconv check   DST [--eld PATH] [--build-dir DIR] [--build-arg ARG] [--dry-run]
-  eldconv flags   "-Wl,--icf=all -Wl,--gc-sections" [--source-linker lld] [--raw]
+  eldconv flags   "-Wl,--icf=all -Wl,--gc-sections" [--source-linker lld] [--target ARCH] [--raw]
   eldconv audit   [--eld PATH]
   eldconv compare REFERENCE OUTPUT
   eldconv surface --eld PATH [-o FILE]
@@ -75,6 +75,25 @@ def _apply_surface(a) -> None:
         raise ValueError(f"cannot read eld surface {choice}: {e}")
 
 
+def _apply_target(a) -> None:
+    """--target ARCH: check options against what eld accepts for that target only."""
+    from . import surface
+    name = getattr(a, "target", None)
+    if not name:
+        surface.set_target(None)
+        return
+    t = surface.normalize_target(name)
+    if t is None:
+        why = "; the kernel's x86 is both i386 and x86_64" if name.lower() == "x86" else ""
+        raise ValueError(f"--target {name}: not a target eld has (one of {', '.join(surface.TARGETS)}, "
+                         f"an alias such as arm64, or a triple such as aarch64-linux-gnu{why})")
+    s = surface.active()
+    if s is not None and t not in s.targets:
+        print(f"[warn] the eld option snapshot has no {t} (targets: {', '.join(s.targets)}); "
+              "options are checked against every target it has", file=sys.stderr)
+    surface.set_target(t)
+
+
 def cmd_detect(a) -> int:
     info = detect(Path(a.src), a.source_linker, log=_log(a), system=a.build_system)
     print(json.dumps(info.as_dict(), indent=2))
@@ -84,6 +103,7 @@ def cmd_detect(a) -> int:
 def cmd_convert(a) -> int:
     log = _log(a)
     _apply_surface(a)
+    _apply_target(a)
     rep = convert_project(Path(a.src), Path(a.dst), eld=a.eld, source_linker=a.source_linker,
                           original_toolchain=a.toolchain_file, extra_cmake_args=" ".join(shlex.quote(x) for x in (a.cmake_arg or [])),
                           force=a.force, log=log, build_system=a.build_system)
@@ -191,6 +211,7 @@ def cmd_compare(a) -> int:
 def cmd_flags(a) -> int:
     log = _log(a)
     _apply_surface(a)
+    _apply_target(a)
     fn = convert_raw_string if a.raw else convert_driver_string
     text = " ".join(a.flags)
     log.step(f"converting {len(text)} char(s) of {'raw ld argv' if a.raw else 'driver flags'} "
@@ -199,6 +220,11 @@ def cmd_flags(a) -> int:
     _print_diags(diags)
     print(out)
     return 0
+
+
+TARGET_HELP = ("the architecture the build links for (x86_64, aarch64, arm, riscv64, riscv32, i386, "
+               "hexagon, or a triple): an option eld accepts only for other targets is dropped "
+               "(default: keep an option eld accepts for any target; a link's own -m wins)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -266,6 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="what eld accepts: the bundled snapshot (default), auto (probe --eld "
                         "once, then cache), a file from `eldconv surface`, or none to trust "
                         "the rule table alone")
+    c.add_argument("--target", metavar="ARCH", help=TARGET_HELP)
     c.set_defaults(fn=cmd_convert)
 
     k = sub.add_parser("check", parents=[common, chk], help="build DST with eld and verify")
@@ -301,6 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--raw", action="store_true", help="treat input as a raw ld argv, not driver flags")
     f.add_argument("--eld-surface", metavar="FILE|auto|bundled|none")
     f.add_argument("--eld", help="the ld.eld --eld-surface auto probes (default: ld.eld on PATH)")
+    f.add_argument("--target", metavar="ARCH", help=TARGET_HELP)
     f.set_defaults(fn=cmd_flags)
     return p
 
@@ -315,10 +343,10 @@ def _protect_flag_operands(argv: List[str]) -> List[str]:
     while i < len(argv):
         a = argv[i]
         if (a in ("--raw", "-h", "--help", "-v", "--verbose", "-vv")
-                or a.startswith(("--source-linker=", "--eld-surface=", "--eld="))):
+                or a.startswith(("--source-linker=", "--eld-surface=", "--eld=", "--target="))):
             opts.append(a)
             i += 1
-        elif a in ("--source-linker", "--eld-surface", "--eld"):
+        elif a in ("--source-linker", "--eld-surface", "--eld", "--target"):
             opts.extend(argv[i:i + 2])
             i += 2
         else:

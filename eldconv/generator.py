@@ -408,12 +408,18 @@ def _copy_tree(src: Path, dst: Path, exclude_build_dirs: bool) -> None:
 
 def _check_surface_version(eld: str, report: "ConversionReport", log: Log) -> None:
     """Warn when the eld being targeted is not the one the surface describes."""
-    from .surface import active, eld_version
+    from .surface import active, active_target, eld_version
     s = active()
     if s is None:
         report.diagnostics.append(Diag("info", "eld surface",
                                        "disabled: options eld rejects are not filtered out"))
         return
+    t = active_target()
+    if t:
+        how = (f"what eld accepts for {t} links" if t in s.targets else
+               f"what eld accepts for any target (the snapshot has no {t})")
+        report.diagnostics.append(Diag("info", "--target", f"options are checked against {how}; "
+                                                           "a link's own -m EMULATION wins"))
     exe = eld if "/" in eld else shutil.which(eld)
     if not exe or not os.access(exe, os.X_OK):
         return
