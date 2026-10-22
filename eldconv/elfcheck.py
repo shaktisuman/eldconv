@@ -9,7 +9,8 @@ allocated sections no segment loads. Any of these means a broken image, whatever
 what a user of the binary would notice: a different interpreter or SONAME, libraries no
 longer needed (or newly needed), symbols no longer exported or with another version, lost
 hardening (RELRO, BIND_NOW, a non-executable stack, PIE), missing sections and symbols, and
-size. Layout differences between two linkers are expected and not reported.
+size; then, through layout.compare_layout, how the image is laid out: segments, permissions,
+order, placement and the symbols that mark section edges.
 """
 from __future__ import annotations
 
@@ -32,6 +33,10 @@ class Finding:
 
 
 # ---------------------------------------------------------------------------- validate
+
+# What a missing PT_GNU_STACK does on Linux: the default stack permissions include execute.
+_NO_STACK = ("thread stacks are mapped executable, and glibc 2.41 and later refuse to dlopen "
+             "such a library")
 
 _DT_STRINGS = (DT_NEEDED, DT_SONAME, DT_RPATH, DT_RUNPATH)
 
@@ -94,6 +99,12 @@ def validate(elf: ELF) -> List[Finding]:
                 bad("segment", f"PT_LOAD at {p.vaddr:#x} is writable and executable", "warn")
         if elf.exec_stack:
             bad("stack", "PT_GNU_STACK asks for an executable stack", "warn")
+        elif elf.exec_stack is None and (elf.interp or elf.needed or elf.soname):
+            # (what ld.so loads; a kernel image has a dynamic section, but none of these)
+            # eld writes PT_GNU_STACK only for an explicit -z [no]execstack: it does not read
+            # the inputs' .note.GNU-stack sections as GNU ld does
+            bad("stack", f"has no PT_GNU_STACK, so the dynamic loader assumes it needs an executable "
+                         f"stack ({_NO_STACK}); link with -z noexecstack", "warn")
         if elf.type == 3 and elf.textrel:
             bad("dynamic", "has text relocations (DT_TEXTREL): its code pages are written at load time",
                 "warn")
@@ -204,12 +215,15 @@ def _related(name: str, others) -> bool:
     return any(o.startswith(name + ".") or name.startswith(o + ".") for o in others)
 
 
-def compare(ref: ELF, new: ELF, roots: Optional[Tuple[str, str]] = None) -> List[Finding]:
+def compare(ref: ELF, new: ELF, roots: Optional[Tuple[str, str]] = None,
+            scripted: bool = False) -> List[Finding]:
     """What changed from the reference linker's output (`ref`) to eld's (`new`).
 
     `roots` is (reference tree, converted tree): paths baked into the binaries (RUNPATH)
-    differ by exactly that, which is not a difference.
+    differ by exactly that, which is not a difference. `scripted`: a linker script placed
+    the image, so its layout is held to the reference's (layout.compare_layout).
     """
+    from .layout import compare_layout
     out: List[Finding] = []
 
     def add(level: str, what: str, msg: str) -> None:
@@ -257,6 +271,9 @@ def compare(ref: ELF, new: ELF, roots: Optional[Tuple[str, str]] = None) -> List
     if needs:
         add("warn", "imports", f"{len(needs)} undefined symbol(s) the reference does not need: {_list(needs)}")
 
+    if ref.exec_stack is False and new.exec_stack is None:
+        add("error", "stack", f"has no PT_GNU_STACK, so it needs an executable stack ({_NO_STACK}); "
+                              "the reference marks the stack non-executable")
     if not ref.exec_stack and new.exec_stack:
         add("error", "stack", "asks for an executable stack; the reference does not")
     if ref.has_relro and not new.has_relro:
@@ -310,4 +327,5 @@ def compare(ref: ELF, new: ELF, roots: Optional[Tuple[str, str]] = None) -> List
     tr, tn = rs.get(".text"), ns.get(".text")
     if tr and tn and tr != tn:
         add("info", "size", f".text is {tn} bytes, {(tn - tr) / tr:+.1%} against the reference's {tr}")
+    out.extend(compare_layout(ref, new, scripted))
     return out

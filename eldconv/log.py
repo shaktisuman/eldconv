@@ -71,6 +71,12 @@ class Log:
     def error(self, msg: str) -> None:
         self._emit(" x", msg, "31")
 
+    def finding(self, level: str, msg: str) -> None:
+        """A problem or warning `check` found and will list in its report: shown as it is
+        found only at -v, so a quiet run prints it once, in the report."""
+        if self.level >= VERBOSE:
+            (self.error if level == "error" else self.warn)(msg)
+
     def diag(self, level: str, msg: str) -> None:
         """A converter diagnostic.
 

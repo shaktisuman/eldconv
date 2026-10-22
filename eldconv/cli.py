@@ -125,25 +125,31 @@ def cmd_check(a) -> int:
                     timeout=getattr(a, "timeout", None), pre_build=getattr(a, "pre_build", None) or [],
                     allow_unresolved_data=getattr(a, "allow_unresolved_data", False),
                     allow_ignored_version_scripts=getattr(a, "allow_ignored_version_scripts", False),
-                    compare=getattr(a, "compare", False),
+                    compare=getattr(a, "compare", None),
                     reference_dir=Path(a.reference_dir) if getattr(a, "reference_dir", None) else None,
                     log=_log(a))
     if a.dry_run:
         for c in res.commands:
             print(" ".join(c))
         return 0
-    print(json.dumps({k: v for k, v in res.as_dict().items() if k not in ("stdout_tail",)}, indent=2))
     if res.eld is None:
         print("error: " + "; ".join(res.problems), file=sys.stderr)
         return 2    # usage/input error, like `audit` and `surface`
-    if not res.ok and res.stderr_tail:
+    if res.returncode and res.stderr_tail:
         print("--- stderr tail ---\n" + res.stderr_tail, file=sys.stderr)
-    if not res.ok and res.build_log:
-        print(f"full build output: {res.build_log}", file=sys.stderr)
-    if res.reference and res.reference.get("returncode") == 0:
-        print(f"compared {res.reference['compared']} output(s) with the reference build in "
-              f"{res.reference['dir']}", file=sys.stderr)
-    print("CHECK " + ("PASSED" if res.ok else "FAILED"))
+    if getattr(a, "json", False):
+        print(json.dumps({k: v for k, v in res.as_dict().items() if k not in ("stdout_tail",)}, indent=2))
+        print("CHECK " + ("PASSED" if res.ok else "FAILED"))
+        return 0 if res.ok else 1
+    from .checker import CHECK_MARKDOWN, CHECK_REPORT
+    from .report import check_text, use_color
+    bd = Path(res.build_dir) if res.build_dir else None
+    files = [str(bd / CHECK_MARKDOWN), str(bd / CHECK_REPORT)] if bd else []
+    files += [f"{res.build_log} (build log)" if res.build_log else ""]
+    if res.reference:
+        files.append(f"{res.reference.get('build_log')} (original build log)")
+    print(check_text(res.as_dict(), Path(a.dst).resolve(), color=use_color(sys.stdout),
+                     verbose=bool(getattr(a, "verbose", 0)), files=files))
     return 0 if res.ok else 1
 
 
@@ -192,20 +198,27 @@ def cmd_surface(a) -> int:
 def cmd_compare(a) -> int:
     from .elf import open_elf
     from .elfcheck import compare, validate
+    from .layout import layout
+    from .report import compare_markdown, compare_text, use_color
     with open_elf(a.reference) as ref, open_elf(a.output) as out:
         for p, e in ((a.reference, ref), (a.output, out)):
             if e is None:
                 print(f"eldconv: {p} is not an ELF file", file=sys.stderr)
                 return 2
-        found = [dict(f.as_dict(), check="validate") for f in validate(out)] \
-            + [dict(f.as_dict(), check="compare") for f in compare(ref, out)]
-    print(json.dumps({"reference": a.reference, "output": a.output, "findings": found}, indent=2))
-    for f in found:
-        print(f"[{f['level']}] {f['what']}: {f['message']}", file=sys.stderr)
-    bad = sum(1 for f in found if f["level"] == "error")
-    print(f"COMPARE: {bad} error(s), {sum(1 for f in found if f['level'] == 'warn')} warning(s)",
-          file=sys.stderr)
-    return 1 if bad else 0
+        found = [dict(f.as_dict(), check="validate", what="image: " + f.what) for f in validate(out)] \
+            + [dict(f.as_dict(), check="compare") for f in compare(ref, out, scripted=a.script)]
+        lay = {"reference": layout(ref), "eld": layout(out)}
+    if a.report:
+        Path(a.report).write_text(compare_markdown(a.reference, a.output, found, lay))
+    if a.json:
+        print(json.dumps({"reference": a.reference, "output": a.output, "findings": found,
+                          "layout": lay}, indent=2))
+    else:
+        print(compare_text(a.reference, a.output, found, lay, color=use_color(sys.stdout),
+                           verbose=bool(a.verbose)))
+    if a.report:
+        print(f"report: {a.report}", file=sys.stderr)
+    return 1 if any(f["level"] == "error" for f in found) else 0
 
 
 def cmd_flags(a) -> int:
@@ -262,11 +275,16 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--no-clean", action="store_true",
                    help="build incrementally (an up-to-date tree then verifies nothing)")
     g.add_argument("--timeout", type=int, default=None, help="per-command timeout in seconds")
-    g.add_argument("--compare", action="store_true",
-                   help="also build the original tree with its own linker (in a copy) and report "
-                        "how each eld output differs from its counterpart there")
+    cg = g.add_mutually_exclusive_group()
+    cg.add_argument("--compare", dest="compare", action="store_const", const=True, default=None,
+                    help="require the comparison with the original build: fail the check if the "
+                         "original tree cannot be built (by default it is compared when it can be)")
+    cg.add_argument("--no-compare", dest="compare", action="store_const", const=False,
+                    help="do not build the original tree with its own linker for comparison")
     g.add_argument("--reference-dir", metavar="DIR",
-                   help="--compare: where to build the original (default: DST.reference)")
+                   help="where to build the original tree for the comparison (default: DST.reference)")
+    g.add_argument("--json", action="store_true",
+                   help="print the result as JSON instead of the report (both are saved in the build dir)")
 
     d = sub.add_parser("detect", parents=[common], help="detect build system / toolchain / linker")
     d.add_argument("src")
@@ -320,6 +338,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="check an ELF file and compare it with the same file from another linker")
     cp.add_argument("reference", help="the file as the original linker made it")
     cp.add_argument("output", help="the file as eld made it")
+    cp.add_argument("--script", action="store_true",
+                    help="the image is placed by a linker script: hold its layout (base address, "
+                         "section order, load addresses, section-edge symbols) to the reference's")
+    cp.add_argument("--report", metavar="FILE", help="also write the comparison as Markdown to FILE")
+    cp.add_argument("--json", action="store_true", help="print JSON instead of the report")
     cp.set_defaults(fn=cmd_compare)
 
     f = sub.add_parser("flags", parents=[common], help="convert a flag string")

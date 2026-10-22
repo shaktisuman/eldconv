@@ -20,9 +20,11 @@ from .elf import (ELF, SHF_ALLOC, SHN_UNDEF, SHT_DYNSYM, SHT_REL, SHT_RELA, SHT_
 from .elfcheck import validate
 from .flags import parse_raw
 from .log import NULL_LOG, Log
+from .report import check_markdown
 from .generator import ARGS_GN_FILE, MK_FILE, SHIM_DIR, TOOLCHAIN_FILE, load_report
 
 CHECK_REPORT = "eldconv-check.json"
+CHECK_MARKDOWN = "eldconv-check.md"
 LOG_NAME = "eld-link.log"
 BUILD_LOG = "eldconv-build.log"
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -101,6 +103,12 @@ class LinkInvocation:
             return None
         p = Path(o)
         return p if p.is_absolute() else Path(self.cwd) / p
+
+    def placed_by_script(self) -> bool:
+        """A linker script (-T, --script, --default-script) or -Ttext/-Tdata/-Tbss fixes where
+        the image goes: its layout is part of the contract, not the linker's choice."""
+        return any(a.startswith(("-T", "--script", "-dT", "--dT", "--default-script"))
+                   for a in self.args)
 
     def option_names(self) -> List[str]:
         names = []
@@ -703,22 +711,26 @@ def reference_commands(ref: Path, ref_build: Path, system: str, jobs: int, extra
 def _compare_with_reference(res: CheckResult, report: dict, dst: Path, build_dir: Path, system: str,
                             jobs: int, extra_cmake: List[str], build_args: List[str],
                             pre_build: List[str], timeout: Optional[int], stream: bool, runner: Runner,
-                            reference_dir: Optional[Path], log: Log) -> None:
+                            reference_dir: Optional[Path], log: Log, required: bool = True) -> None:
     """Build the original tree with its own linker and compare each eld output with the file
-    of the same name there."""
+    of the same name there. Not `required` (the default comparison, nobody asked for it): what
+    stops it is a warning, not a failed check."""
     from .elfcheck import compare
     from .generator import _copy_tree
+    from .layout import layout
+    cannot = res.problems if required else res.warnings
+    what = "--compare" if required else "compare with the original build"
     src = Path(report.get("source") or "")
     if not report.get("source") or not src.is_dir():
-        res.problems.append("--compare: the source tree this was converted from is not recorded or no "
-                            f"longer exists ({report.get('source') or 'no eldconv-report.json'})")
+        cannot.append(f"{what}: the source tree this was converted from is not recorded or no "
+                      f"longer exists ({report.get('source') or 'no eldconv-report.json'})")
         return
     ref = Path(reference_dir) if reference_dir else dst.parent / f"{dst.name}.reference"
     ref = ref if ref.is_absolute() else Path.cwd() / ref
     if ref.exists() or ref.is_symlink():
         if not (ref / REFERENCE_MARK).is_file() or ref.is_symlink():
-            res.problems.append(f"--compare: refusing to replace {ref}: it is not a reference build "
-                                f"eldconv made (no {REFERENCE_MARK}); remove it or pass --reference-dir")
+            cannot.append(f"{what}: refusing to replace {ref}: it is not a reference build "
+                          f"eldconv made (no {REFERENCE_MARK}); remove it or pass --reference-dir")
             return
         shutil.rmtree(ref)
     log.step(f"building the reference: {src} with its own linker, in {ref}")
@@ -735,8 +747,8 @@ def _compare_with_reference(res: CheckResult, report: dict, dst: Path, build_dir
     res.reference = {"dir": str(ref), "build_dir": str(ref_build), "build_log": str(ref_log),
                      "commands": cmds, "returncode": rc, "compared": 0}
     if rc != 0:
-        res.problems.append(f"--compare: the reference build failed (rc={rc}"
-                            + (f"; {problems[0]}" if problems else "") + f"); see {ref_log}")
+        cannot.append(f"{what}: the original tree did not build with its own linker (rc={rc}"
+                      + (f"; {problems[0]}" if problems else "") + f"); see {ref_log}")
         return
     log.step("comparing eld's outputs with the reference")
     for e in res.outputs:
@@ -752,9 +764,10 @@ def _compare_with_reference(res: CheckResult, report: dict, dst: Path, build_dir
         with open_elf(refp) as r, open_elf(out) as n:
             if r is None or n is None:
                 e["reference"] = None
-                res.warnings.append(f"--compare: {out}: the reference build made no ELF file {refp}")
+                res.warnings.append(f"{what}: {out}: the reference build made no ELF file {refp}")
                 continue
-            findings = compare(r, n, (str(ref), str(dst)))
+            findings = compare(r, n, (str(ref), str(dst)), scripted=bool(e.get("script")))
+            e["layout"] = {"reference": layout(r), "eld": layout(n)}
         res.reference["compared"] += 1
         e["reference"] = str(refp)
         e["differences"] = [f.as_dict() for f in findings]
@@ -764,7 +777,7 @@ def _compare_with_reference(res: CheckResult, report: dict, dst: Path, build_dir
                 (res.problems if f.level == "error" else res.warnings).append(
                     f"{out}: {f.message} (compared with {refp})")
     if not res.reference["compared"]:
-        res.warnings.append("--compare: no eld output had a counterpart in the reference build")
+        res.warnings.append(f"{what}: no eld output had a counterpart in the reference build")
 
 
 def _run_commands(commands: List[List[str]], env: dict, cwd: Path, build_log: Path, stream: bool,
@@ -788,11 +801,11 @@ def _run_commands(commands: List[List[str]], env: dict, cwd: Path, build_log: Pa
                     sink.write((r.stdout or "") + (r.stderr or ""))
             except FileNotFoundError:
                 problems.append(f"build tool not found: {cmd[0]} (install it or put it on PATH)")
-                log.error(problems[-1])
+                log.finding("error", problems[-1])
                 return out, err, 127
             except subprocess.TimeoutExpired as e:
                 problems.append(f"timed out after {timeout}s: {' '.join(cmd)}")
-                log.error(problems[-1])
+                log.finding("error", problems[-1])
                 o = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
                 r_err = (e.stderr or b"").decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
                 if not stream:
@@ -814,8 +827,14 @@ def run_check(dst: Path, eld: Optional[str] = None, build_dir: Optional[Path] = 
               runner: Optional[Runner] = None, probe: bool = True, clean: bool = True,
               build_args: Optional[List[str]] = None, timeout: Optional[int] = None,
               pre_build: Optional[List[str]] = None, allow_unresolved_data: bool = False,
-              allow_ignored_version_scripts: bool = False, compare: bool = False,
+              allow_ignored_version_scripts: bool = False, compare: Optional[bool] = False,
               reference_dir: Optional[Path] = None, log: Log = NULL_LOG) -> CheckResult:
+    """Build `dst` with eld and verify what it linked.
+
+    `compare`: True builds the original tree with its own linker and compares every output
+    with its counterpart, and fails the check when that cannot be done; None does the same
+    when it can (the CLI's default), with a warning when it cannot; False skips it.
+    """
     dst = Path(dst).resolve()
     jobs = jobs or default_jobs()
     # The build streams its output into a log file; a runner passed in (the tests' fakes)
@@ -927,6 +946,8 @@ def run_check(dst: Path, eld: Optional[str] = None, build_dir: Optional[Path] = 
         entry: Dict = {"output": str(op) if op else None, "cwd": inv.cwd, "argc": len(inv.args)}
         if inv.is_trycompile():
             entry["trycompile"] = True
+        if inv.placed_by_script():
+            entry["script"] = True
         if op is not None:
             entry["exists"] = op.exists()
             entry["elf"] = is_elf(op) if op.exists() else False
@@ -951,7 +972,6 @@ def run_check(dst: Path, eld: Optional[str] = None, build_dir: Optional[Path] = 
         res.problems.append(
             "eld did not recognise, and silently ignored, these flags (the build "
             "succeeded without them): " + " ".join(res.ignored_flags))
-        log.error(res.problems[-1])
     skipped = ignored_version_scripts(out + err)
     if skipped:
         msg = ("eld ignored the named version nodes of these version scripts, so the "
@@ -960,10 +980,8 @@ def run_check(dst: Path, eld: Optional[str] = None, build_dir: Optional[Path] = 
                "-DELD_ENABLE_SYMBOL_VERSIONING=ON; rebuild eld with it)")
         if allow_ignored_version_scripts:
             res.warnings.append(msg)
-            log.warn(msg)
         else:
             res.problems.append(msg)
-            log.error(msg)
     if rc != 0:
         res.problems.append(f"build failed (rc={rc})")
     if not invs:
@@ -1037,12 +1055,12 @@ def run_check(dst: Path, eld: Optional[str] = None, build_dir: Optional[Path] = 
         for f in found:
             (res.problems if f.level == "error" else res.warnings).append(
                 f"{e['output']}: {'malformed ELF: ' if f.level == 'error' else ''}{f.message}")
-    if compare:
+    if compare is not False:
         if rc == 0 and invs:
             _compare_with_reference(res, report, dst, build_dir, system, jobs, extra_cmake or [],
                                     build_args or [], pre_build or [], timeout, stream, runner,
-                                    reference_dir, log)
-        else:
+                                    reference_dir, log, required=bool(compare))
+        elif compare:
             res.warnings.append("--compare: skipped, the eld build did not link anything to compare")
     if res.unknown_flags:
         (res.warnings if rc == 0 else res.problems).append(
@@ -1058,10 +1076,12 @@ def run_check(dst: Path, eld: Optional[str] = None, build_dir: Optional[Path] = 
         if not confirmed:
             res.warnings.append(f"tentative mapping not confirmed by eld: {d['flag']}")
     res.ok = not res.problems
+    # a quiet run prints these once, in the report (report.py)
     for w in res.warnings:
-        log.warn(w)
+        log.finding("warn", w)
     for pr in res.problems:
-        log.error(pr)
+        log.finding("error", pr)
     log.step("CHECK " + ("PASSED" if res.ok else "FAILED"))
     (build_dir / CHECK_REPORT).write_text(json.dumps(res.as_dict(), indent=2))
+    (build_dir / CHECK_MARKDOWN).write_text(check_markdown(res.as_dict(), dst))
     return res

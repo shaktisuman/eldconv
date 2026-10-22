@@ -233,3 +233,23 @@ reports. It also reported `.data.rel.ro` against `.data.rel.ro.local`, tree path
 page-sized growth of small programs; none of these are differences now. Validation alone, run over
 6065 ELF files from this host's `/usr`, reports nothing.
 
+### Layout (22 October 2026)
+
+Comparing layouts as well (`layout.py`, now part of every `check`) finds three more differences in
+the same 9 outputs:
+
+- **No `PT_GNU_STACK`** (error). eld writes the segment only for an explicit `-z noexecstack` or
+  `-z execstack`; it ignores the inputs' `.note.GNU-stack` sections, from which GNU ld decides. Without
+  the segment the loader assumes an executable stack. On this host's glibc 2.43, `dlopen` of eld's
+  `liblz4.so` and `libz.so` fails with "cannot enable executable stack as shared object requires",
+  and GNU ld's builds of the same libraries load. A minimal `-shared` link through eld gets
+  `GNU_STACK RW` with `-Wl,-z,noexecstack`, and none without it.
+- **No `PT_GNU_PROPERTY`** (warning): `.note.gnu.property` is not carried over, so the inputs' CET
+  markings are lost.
+- **Read-only data in the code segment** (warning): eld maps the headers, `.rodata`, `.eh_frame` and
+  the dynamic tables in one `R X` segment with `.text`. GNU ld (`-z separate-code`, its x86_64 Linux
+  default) keeps code in a segment of its own.
+
+Section order and addresses differ too (eld places `.gnu.hash` and `.eh_frame_hdr` elsewhere); for
+images a linker script does not place, that is only information.
+
