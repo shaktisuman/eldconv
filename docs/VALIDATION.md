@@ -205,3 +205,31 @@ Found when re-validating against eld `main` of 13 Oct 2026:
 - **Skipped version scripts went unnoticed.** An eld built with default CMake options drops every
   named version node with a warning; the arm64 vDSO and zlib then link without symbol versions.
   `check` now fails on it (`--allow-ignored-version-scripts` to downgrade).
+
+
+## Comparing eld's outputs with GNU ld's (21 October 2026)
+
+`check --compare` against eld `main` bc23b56 (llvm-project ba448bd, the nightly's build), x86_64,
+with `--allow-unresolved-data` for the known copy-relocation gap:
+
+| project | outputs compared | differences beyond information |
+|---|---|---|
+| lz4 1.10.0 (Make) | `liblz4.so`, `lz4` | extra `DT_NEEDED`; `_GLOBAL_OFFSET_TABLE_` undefined; `main` exported |
+| zlib 1.3.1 (Make, `--pre-build ./configure`) | `libz.so` and 4 programs | the same three |
+| lua 5.4.7 (Make, `--build-arg linux`) | `lua`, `luac` | extra `DT_NEEDED`; `_GLOBAL_OFFSET_TABLE_` undefined |
+
+All three are eld behaviour, confirmed with `readelf`:
+
+- **Extra `DT_NEEDED` entries.** gcc links with `--push-state --as-needed -lgcc_s --pop-state`, and
+  libc's `libc.so` script names `ld-linux-x86-64.so.2` in `AS_NEEDED(...)`. GNU ld records neither
+  library when nothing uses it, and eld records both, so every eld output loads `libgcc_s.so.1`.
+- **`_GLOBAL_OFFSET_TABLE_` is an undefined dynamic symbol** in eld's shared libraries and
+  executables. GNU ld defines it locally.
+- **`main` is exported** from eld's executables (`lz4`, zlib's examples) without `-E`.
+
+All 9 outputs pass the image checks. Before tuning, the comparison also reported copy-relocated
+`stdout`/`stdin`/`stderr` as lost exports. Those are the unresolved-data gap that `check` already
+reports. It also reported `.data.rel.ro` against `.data.rel.ro.local`, tree paths in `RUNPATH`, and
+page-sized growth of small programs; none of these are differences now. Validation alone, run over
+6065 ELF files from this host's `/usr`, reports nothing.
+

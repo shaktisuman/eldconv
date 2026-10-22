@@ -15,6 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
+from .elf import (ELF, SHF_ALLOC, SHN_UNDEF, SHT_DYNSYM, SHT_REL, SHT_RELA, SHT_RELR, SHT_SYMTAB,
+                  STB_GLOBAL, STB_WEAK, STT_OBJECT, STT_TLS, open_elf)
+from .elfcheck import validate
 from .flags import parse_raw
 from .log import NULL_LOG, Log
 from .generator import ARGS_GN_FILE, MK_FILE, SHIM_DIR, TOOLCHAIN_FILE, load_report
@@ -133,10 +136,11 @@ class CheckResult:
     warnings: List[str] = field(default_factory=list)
     tentative_confirmed: Dict[str, bool] = field(default_factory=dict)
     build_log: Optional[str] = None     # every command's full output
+    reference: Optional[Dict] = None    # --compare: the original linker's build
 
     def as_dict(self) -> dict:
         return {"ok": self.ok, "eld": self.eld, "eld_version": self.eld_version,
-                "build_dir": self.build_dir, "build_log": self.build_log,
+                "build_dir": self.build_dir, "build_log": self.build_log, "reference": self.reference,
                 "commands": self.commands, "returncode": self.returncode,
                 "invocations": self.invocations, "probes": self.probes, "trycompiles": self.trycompiles,
                 "outputs": self.outputs,
@@ -220,83 +224,21 @@ def _tolerant(default):
     return wrap
 
 
-@_tolerant(False)
 def is_elf(path: Path) -> bool:
-    try:
-        with open(path, "rb") as fh:
-            hdr = fh.read(20)
-    except OSError:
-        return False
-    if len(hdr) < 20 or hdr[:4] != b"\x7fELF":
-        return False
-    e_type = struct.unpack("<H" if hdr[5] == 1 else ">H", hdr[16:18])[0]
-    return e_type in (1, 2, 3, 4)  # REL, EXEC, DYN, CORE
+    with open_elf(path) as elf:
+        return elf is not None and elf.type in (1, 2, 3, 4)  # REL, EXEC, DYN, CORE
 
 
-@_tolerant(None)
 def elf_type(path: Path) -> Optional[str]:
-    try:
-        with open(path, "rb") as fh:
-            hdr = fh.read(20)
-    except OSError:
-        return None
-    if hdr[:4] != b"\x7fELF":
-        return None
-    e_type = struct.unpack("<H" if hdr[5] == 1 else ">H", hdr[16:18])[0]
-    return {1: "REL", 2: "EXEC", 3: "DYN", 4: "CORE"}.get(e_type, str(e_type))
+    with open_elf(path) as elf:
+        return elf.type_name if elf else None
 
 
 @_tolerant(lambda: (None, ""))
 def elf_notes_and_comment(path: Path) -> Tuple[Optional[str], str]:
     """(GNU build-id as hex, .comment text) of an ELF file; (None, "") if unreadable."""
-    try:
-        data = Path(path).read_bytes()
-    except OSError:
-        return None, ""
-    if len(data) < 64 or data[:4] != b"\x7fELF":
-        return None, ""
-    is64, le = data[4] == 2, data[5] == 1
-    e = "<" if le else ">"
-    try:
-        if is64:
-            shoff, = struct.unpack_from(e + "Q", data, 0x28)
-            shentsize, shnum, shstrndx = struct.unpack_from(e + "HHH", data, 0x3A)
-        else:
-            shoff, = struct.unpack_from(e + "I", data, 0x20)
-            shentsize, shnum, shstrndx = struct.unpack_from(e + "HHH", data, 0x2E)
-        secs = []
-        for i in range(shnum):
-            off = shoff + i * shentsize
-            if is64:
-                name, typ, _, _, soff, size = struct.unpack_from(e + "IIQQQQ", data, off)
-            else:
-                name, typ, _, _, soff, size = struct.unpack_from(e + "IIIIII", data, off)
-            secs.append((name, typ, soff, size))
-        strtab = secs[shstrndx] if shstrndx < len(secs) else None
-    except struct.error:
-        return None, ""
-
-    def sname(n: int) -> str:
-        if strtab is None:
-            return ""
-        start = strtab[2] + n
-        end = data.find(b"\0", start)
-        return data[start:end].decode(errors="replace")
-
-    build_id, comment = None, ""
-    for name, typ, soff, size in secs:
-        if typ == 7:   # SHT_NOTE
-            pos = soff
-            while pos + 12 <= soff + size:
-                namesz, descsz, ntype = struct.unpack_from(e + "III", data, pos)
-                nstart = pos + 12
-                dstart = nstart + ((namesz + 3) & ~3)
-                if ntype == 3 and data[nstart:nstart + namesz].rstrip(b"\0") == b"GNU":
-                    build_id = data[dstart:dstart + descsz].hex()
-                pos = dstart + ((descsz + 3) & ~3)
-        elif sname(name) == ".comment":
-            comment = data[soff:soff + size].replace(b"\0", b" ").decode(errors="replace")
-    return build_id, comment
+    with open_elf(path) as elf:
+        return (elf.build_id, elf.comment) if elf else (None, "")
 
 
 # glibc's own bookkeeping symbols, which distro binaries list as undefined with no relocation
@@ -313,64 +255,36 @@ def unresolved_data_symbols(path: Path) -> List[str]:
     valid ELF. Reading the symbol and relocation tables is enough to see it, with no need to
     run the binary (which may be a cross-compiled one).
     """
-    try:
-        data = Path(path).read_bytes()
-    except OSError:
-        return []
-    if len(data) < 64 or data[:4] != b"\x7fELF" or data[5] not in (1, 2):
-        return []
-    is64, e = data[4] == 2, "<" if data[5] == 1 else ">"
-    try:
-        if is64:
-            shoff, = struct.unpack_from(e + "Q", data, 0x28)
-            shentsize, shnum = struct.unpack_from(e + "HH", data, 0x3A)
-        else:
-            shoff, = struct.unpack_from(e + "I", data, 0x20)
-            shentsize, shnum = struct.unpack_from(e + "HH", data, 0x2E)
-        secs = []   # (type, offset, size, link, entsize)
-        for i in range(shnum):
-            off = shoff + i * shentsize
-            if is64:
-                _, typ, _, _, soff, size, link, _, _, entsize = struct.unpack_from(e + "IIQQQQIIQQ", data, off)
-            else:
-                _, typ, _, _, soff, size, link, _, _, entsize = struct.unpack_from(e + "IIIIIIIIII", data, off)
-            secs.append((typ, soff, size, link, entsize))
-        dyn = [i for i, sec in enumerate(secs) if sec[0] == 11]       # SHT_DYNSYM
-        if not dyn:
-            return []
-        di = dyn[0]
-        referenced = set()
-        for typ, soff, size, link, entsize in secs:
-            if typ not in (4, 9) or link != di:                          # SHT_RELA / SHT_REL
-                continue
-            esz = entsize or ((24 if is64 else 12) if typ == 4 else (16 if is64 else 8))
-            for pos in range(soff, soff + size - esz + 1, esz):
-                info, = struct.unpack_from(e + ("Q" if is64 else "I"), data, pos + (8 if is64 else 4))
-                referenced.add(info >> 32 if is64 else info >> 8)
-        typ, soff, size, link, entsize = secs[di]
-        esz = entsize or (24 if is64 else 16)
-        strtab = secs[link]
-        names = []
-        for idx in range(1, size // esz):
-            pos = soff + idx * esz
-            if is64:
-                name, info, _, shndx = struct.unpack_from(e + "IBBH", data, pos)
-            else:
-                name, _, _, info, _, shndx = struct.unpack_from(e + "IIIBBH", data, pos)
-            if shndx != 0 or info >> 4 not in (1, 2) or info & 0xF not in (1, 6):   # UND, GLOBAL/WEAK, OBJECT/TLS
-                continue
-            if idx in referenced:
-                continue
-            start = strtab[1] + name
-            nm = data[start:data.find(b"\0", start)].decode(errors="replace")
-            if nm not in _GLIBC_INTERNAL_DATA:
-                names.append(nm)
-        return names
-    except struct.error:
-        return []
+    with open_elf(path) as elf:
+        return _unresolved_data_symbols(elf) if elf else []
 
 
-_DYNREL_TYPES = (4, 9, 19)   # SHT_RELA, SHT_REL, SHT_RELR
+def _unresolved_data_symbols(elf: ELF) -> List[str]:
+    dyn = [i for i, sec in enumerate(elf.sections) if sec.type == SHT_DYNSYM]
+    if not dyn:
+        return []
+    di = dyn[0]
+    referenced = set()
+    e, is64 = elf.endian, elf.is64
+    for sec in elf.sections:
+        if sec.type not in (SHT_RELA, SHT_REL) or sec.link != di:
+            continue
+        esz = sec.entsize or ((24 if is64 else 12) if sec.type == SHT_RELA else (16 if is64 else 8))
+        end = min(sec.offset + sec.size, len(elf.data))
+        for pos in range(sec.offset, end - esz + 1, esz):
+            info, = struct.unpack_from(e + ("Q" if is64 else "I"), elf.data, pos + (8 if is64 else 4))
+            referenced.add(info >> 32 if is64 else info >> 8)
+    names = []
+    for sym in elf.symbols(elf.sections[di]):
+        if (sym.shndx != SHN_UNDEF or sym.bind not in (STB_GLOBAL, STB_WEAK)
+                or sym.type not in (STT_OBJECT, STT_TLS) or sym.index in referenced):
+            continue
+        if sym.name not in _GLIBC_INTERNAL_DATA:
+            names.append(sym.name)
+    return names
+
+
+_DYNREL_TYPES = (SHT_RELA, SHT_REL, SHT_RELR)
 
 
 @_tolerant(list)
@@ -385,66 +299,33 @@ def empty_relocation_bounds(path: Path) -> List[Tuple[str, str, str, int]]:
     links, and runs while it is not moved, but applies no relocation once it is: an arm64 kernel
     with KASLR dies before printing anything.
     """
-    try:
-        data = Path(path).read_bytes()
-    except OSError:
-        return []
-    if len(data) < 64 or data[:4] != b"\x7fELF" or data[5] not in (1, 2):
-        return []
-    is64, e = data[4] == 2, "<" if data[5] == 1 else ">"
-    try:
-        if is64:
-            shoff, = struct.unpack_from(e + "Q", data, 0x28)
-            shentsize, shnum, shstrndx = struct.unpack_from(e + "HHH", data, 0x3A)
-        else:
-            shoff, = struct.unpack_from(e + "I", data, 0x20)
-            shentsize, shnum, shstrndx = struct.unpack_from(e + "HHH", data, 0x2E)
-        secs = []   # (name, type, flags, addr, offset, size, link, entsize)
-        for i in range(shnum):
-            off = shoff + i * shentsize
-            if is64:
-                name, typ, flags, addr, soff, size, link, _, _, entsize = struct.unpack_from(
-                    e + "IIQQQQIIQQ", data, off)
-            else:
-                name, typ, flags, addr, soff, size, link, _, _, entsize = struct.unpack_from(
-                    e + "IIIIIIIIII", data, off)
-            secs.append((name, typ, flags, addr, soff, size, link, entsize))
+    with open_elf(path) as elf:
+        return _empty_relocation_bounds(elf) if elf else []
 
-        def cstr(base: int, n: int) -> str:
-            return data[base + n:data.find(b"\0", base + n)].decode(errors="replace")
 
-        relocs = {}   # start address -> (section name, size), allocated non-empty REL/RELA/RELR only
-        for name, typ, flags, addr, _, size, _, _ in secs:
-            if typ in _DYNREL_TYPES and flags & 2 and size:
-                relocs[addr] = (cstr(secs[shstrndx][4], name) if shstrndx < len(secs) else "?", size)
-        symtab = [s for s in secs if s[1] == 2]   # SHT_SYMTAB
-        if not relocs or not symtab:
-            return []
-        _, _, _, _, soff, size, link, entsize = symtab[0]
-        esz = entsize or (24 if is64 else 16)
-        stroff = secs[link][4]
-        # only symbols inside a relocation section's [start, end] can be either half of a pair,
-        # so decode just those names (vmlinux has tens of thousands of symbols)
-        spans = [(a, a + s) for a, (_, s) in relocs.items()]
-        values: Dict[str, int] = {}
-        for pos in range(soff + esz, soff + size - esz + 1, esz):
-            if is64:
-                name, _, _, _, value, _ = struct.unpack_from(e + "IBBHQQ", data, pos)
-            else:
-                name, value, _, _, _, _ = struct.unpack_from(e + "IIIBBH", data, pos)
-            if name and any(lo <= value <= hi for lo, hi in spans):
-                values[cstr(stroff, name)] = value
-        bad = []
-        for start, value in sorted(values.items()):
-            if not start.endswith("_start") or value not in relocs:
-                continue
-            end = start[:-len("_start")] + "_end"
-            section, size = relocs[value]
-            if end in values and values[end] != value + size:
-                bad.append((section, start, end, size))
-        return bad
-    except (struct.error, IndexError):
+def _empty_relocation_bounds(elf: ELF) -> List[Tuple[str, str, str, int]]:
+    relocs = {}   # start address -> (section name, size), allocated non-empty REL/RELA/RELR only
+    for sec in elf.sections:
+        if sec.type in _DYNREL_TYPES and sec.flags & SHF_ALLOC and sec.size:
+            relocs[sec.addr] = (sec.name or "?", sec.size)
+    symtab = next(iter(elf.of_type(SHT_SYMTAB)), None)
+    if not relocs or symtab is None:
         return []
+    # only symbols inside a relocation section's [start, end] can be either half of a pair
+    spans = [(a, a + s) for a, (_, s) in relocs.items()]
+    values: Dict[str, int] = {}
+    for sym in elf.symbols(symtab):
+        if sym.name and any(lo <= sym.value <= hi for lo, hi in spans):
+            values[sym.name] = sym.value
+    bad = []
+    for start, value in sorted(values.items()):
+        if not start.endswith("_start") or value not in relocs:
+            continue
+        end = start[:-len("_start")] + "_end"
+        section, size = relocs[value]
+        if end in values and values[end] != value + size:
+            bad.append((section, start, end, size))
+    return bad
 
 
 def kconfig(dst: Path, build_dir: Optional[Path] = None) -> Dict[str, str]:
@@ -791,13 +672,150 @@ def clean_commands(dst: Path, build_dir: Path, build_args: Optional[List[str]] =
     return []  # cmake: the build dir is removed outright
 
 
+REFERENCE_MARK = ".eldconv-reference"
+REFERENCE_LOG = "eldconv-reference-build.log"
+
+
+def reference_commands(ref: Path, ref_build: Path, system: str, jobs: int, extra_cmake: List[str],
+                       build_args: List[str]) -> List[List[str]]:
+    """What build_commands() runs, for the original tree and its own linker: no shim, no
+    toolchain file, no eld."""
+    if system == "gn":
+        out_rel = ref_build.relative_to(ref) if ref_build.is_relative_to(ref) else ref_build
+        return [["gn", "gen", str(out_rel), f"--root={ref}"],
+                ["ninja", "-C", str(ref_build), f"-j{jobs}", *build_args]]
+    if system == "ninja":
+        return [["ninja", "-C", str(ref), f"-j{jobs}", *build_args]]
+    if system == "cmake":
+        return [["cmake", "-S", str(ref), "-B", str(ref_build), "-DCMAKE_VERBOSE_MAKEFILE=ON", *extra_cmake],
+                ["cmake", "--build", str(ref_build), f"-j{jobs}", *build_args]]
+    if system == "meson":
+        conf, targets = _split_build_args(build_args)
+        return [["meson", "setup", str(ref_build), str(ref), *conf],
+                ["meson", "compile", "-C", str(ref_build), f"-j{jobs}", *targets]]
+    if system == "autotools":
+        conf, targets = _split_build_args(build_args)
+        cmds = [] if (ref / "configure").exists() else [["autoreconf", "-fi"]]
+        return cmds + [["./configure", *conf], ["make", f"-j{jobs}", *targets]]
+    return [["make", "-C", str(ref), f"-j{jobs}", *build_args]]
+
+
+def _compare_with_reference(res: CheckResult, report: dict, dst: Path, build_dir: Path, system: str,
+                            jobs: int, extra_cmake: List[str], build_args: List[str],
+                            pre_build: List[str], timeout: Optional[int], stream: bool, runner: Runner,
+                            reference_dir: Optional[Path], log: Log) -> None:
+    """Build the original tree with its own linker and compare each eld output with the file
+    of the same name there."""
+    from .elfcheck import compare
+    from .generator import _copy_tree
+    src = Path(report.get("source") or "")
+    if not report.get("source") or not src.is_dir():
+        res.problems.append("--compare: the source tree this was converted from is not recorded or no "
+                            f"longer exists ({report.get('source') or 'no eldconv-report.json'})")
+        return
+    ref = Path(reference_dir) if reference_dir else dst.parent / f"{dst.name}.reference"
+    ref = ref if ref.is_absolute() else Path.cwd() / ref
+    if ref.exists() or ref.is_symlink():
+        if not (ref / REFERENCE_MARK).is_file() or ref.is_symlink():
+            res.problems.append(f"--compare: refusing to replace {ref}: it is not a reference build "
+                                f"eldconv made (no {REFERENCE_MARK}); remove it or pass --reference-dir")
+            return
+        shutil.rmtree(ref)
+    log.step(f"building the reference: {src} with its own linker, in {ref}")
+    _copy_tree(src, ref, exclude_build_dirs=True)
+    (ref / REFERENCE_MARK).write_text(f"reference build of {src} for {dst}\n")
+    ref_build = ref / build_dir.relative_to(dst) if build_dir.is_relative_to(dst) else ref / "build-eld"
+    ref_build.mkdir(parents=True, exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ELDCONV_")}
+    cmds = [["sh", "-c", c] for c in pre_build] + reference_commands(
+        ref, ref_build, system, jobs, extra_cmake, build_args)
+    ref_log = ref_build / REFERENCE_LOG
+    problems: List[str] = []
+    _, _, rc = _run_commands(cmds, env, ref, ref_log, stream, runner, timeout, problems, log)
+    res.reference = {"dir": str(ref), "build_dir": str(ref_build), "build_log": str(ref_log),
+                     "commands": cmds, "returncode": rc, "compared": 0}
+    if rc != 0:
+        res.problems.append(f"--compare: the reference build failed (rc={rc}"
+                            + (f"; {problems[0]}" if problems else "") + f"); see {ref_log}")
+        return
+    log.step("comparing eld's outputs with the reference")
+    for e in res.outputs:
+        if e.get("trycompile") or not e.get("elf") or e.get("elf_type") not in ("EXEC", "DYN"):
+            continue
+        out = Path(e["output"])
+        if build_dir != dst and out.is_relative_to(build_dir):
+            refp = ref_build / out.relative_to(build_dir)
+        elif out.is_relative_to(dst):
+            refp = ref / out.relative_to(dst)
+        else:
+            continue
+        with open_elf(refp) as r, open_elf(out) as n:
+            if r is None or n is None:
+                e["reference"] = None
+                res.warnings.append(f"--compare: {out}: the reference build made no ELF file {refp}")
+                continue
+            findings = compare(r, n, (str(ref), str(dst)))
+        res.reference["compared"] += 1
+        e["reference"] = str(refp)
+        e["differences"] = [f.as_dict() for f in findings]
+        for f in findings:
+            log.info(f"{out}: [{f.level}] {f.message}")
+            if f.level != "info":
+                (res.problems if f.level == "error" else res.warnings).append(
+                    f"{out}: {f.message} (compared with {refp})")
+    if not res.reference["compared"]:
+        res.warnings.append("--compare: no eld output had a counterpart in the reference build")
+
+
+def _run_commands(commands: List[List[str]], env: dict, cwd: Path, build_log: Path, stream: bool,
+                  runner: Runner, timeout: Optional[int], problems: List[str], log: Log) \
+        -> Tuple[str, str, int]:
+    """Run `commands` in order until one fails, writing their output to `build_log`.
+    Returns (stdout, stderr, exit status of the last one run)."""
+    out, err, rc = "", "", 0
+    echo = (lambda line: log.build_output(line)) if log.enabled else None
+    with open(build_log, "w", errors="replace") as sink:
+        for cmd in commands:
+            log.command(cmd, str(cwd))
+            sink.write(f"$ {' '.join(cmd)}\n")
+            sink.flush()
+            try:
+                if stream:
+                    r = _run_streaming(cmd, env, str(cwd), timeout, sink, echo)
+                else:
+                    kw = {"timeout": timeout} if timeout else {}
+                    r = runner(cmd, capture_output=True, text=True, env=env, cwd=str(cwd), **kw)
+                    sink.write((r.stdout or "") + (r.stderr or ""))
+            except FileNotFoundError:
+                problems.append(f"build tool not found: {cmd[0]} (install it or put it on PATH)")
+                log.error(problems[-1])
+                return out, err, 127
+            except subprocess.TimeoutExpired as e:
+                problems.append(f"timed out after {timeout}s: {' '.join(cmd)}")
+                log.error(problems[-1])
+                o = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+                r_err = (e.stderr or b"").decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+                if not stream:
+                    sink.write(o + r_err)
+                sink.write(f"[timed out after {timeout}s]\n")
+                return out + o, err + r_err, 124
+            log.info(f"exit {r.returncode}")
+            sink.write(f"[exit {r.returncode}]\n")
+            out += r.stdout or ""
+            err += r.stderr or ""
+            rc = r.returncode
+            if rc != 0:
+                break
+    return out, err, rc
+
+
 def run_check(dst: Path, eld: Optional[str] = None, build_dir: Optional[Path] = None,
               jobs: Optional[int] = None, dry_run: bool = False, extra_cmake: Optional[List[str]] = None,
               runner: Optional[Runner] = None, probe: bool = True, clean: bool = True,
               build_args: Optional[List[str]] = None, timeout: Optional[int] = None,
               pre_build: Optional[List[str]] = None, allow_unresolved_data: bool = False,
-              allow_ignored_version_scripts: bool = False,
-              log: Log = NULL_LOG) -> CheckResult:
+              allow_ignored_version_scripts: bool = False, compare: bool = False,
+              reference_dir: Optional[Path] = None, log: Log = NULL_LOG) -> CheckResult:
     dst = Path(dst).resolve()
     jobs = jobs or default_jobs()
     # The build streams its output into a log file; a runner passed in (the tests' fakes)
@@ -884,49 +902,12 @@ def run_check(dst: Path, eld: Optional[str] = None, build_dir: Optional[Path] = 
     rsp_copies = Path(f"{log_path}.rsp")   # the shim's copies of response files
     if rsp_copies.is_dir() and not rsp_copies.is_symlink():
         shutil.rmtree(rsp_copies)
-    out, err, rc = "", "", 0
     started = time.time() - 1
     log.step("building")
     build_log = build_dir / BUILD_LOG
     res.build_log = str(build_log)
-    sink = open(build_log, "w", errors="replace")
-    echo = (lambda line: log.build_output(line)) if log.enabled else None
-    for cmd in res.commands:
-        log.command(cmd, str(dst))
-        sink.write(f"$ {' '.join(cmd)}\n")
-        sink.flush()
-        try:
-            if stream:
-                r = _run_streaming(cmd, env, str(dst), timeout, sink, echo)
-            else:
-                kw = {"timeout": timeout} if timeout else {}
-                r = runner(cmd, capture_output=True, text=True, env=env, cwd=str(dst), **kw)
-                sink.write((r.stdout or "") + (r.stderr or ""))
-        except FileNotFoundError:
-            res.problems.append(f"build tool not found: {cmd[0]} (install it or put it on PATH)")
-            log.error(res.problems[-1])
-            rc = 127
-            break
-        except subprocess.TimeoutExpired as e:
-            res.problems.append(f"timed out after {timeout}s: {' '.join(cmd)}")
-            log.error(res.problems[-1])
-            o = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-            r_err = (e.stderr or b"").decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
-            if not stream:
-                sink.write(o + r_err)
-            sink.write(f"[timed out after {timeout}s]\n")
-            out += o
-            err += r_err
-            rc = 124
-            break
-        log.info(f"exit {r.returncode}")
-        sink.write(f"[exit {r.returncode}]\n")
-        out += r.stdout or ""
-        err += r.stderr or ""
-        rc = r.returncode
-        if rc != 0:
-            break
-    sink.close()
+    out, err, rc = _run_commands(res.commands, env, dst, build_log, stream, runner, timeout,
+                                 res.problems, log)
     res.returncode = rc
     res.stdout_tail = out[-4000:]
     res.stderr_tail = err[-4000:]
@@ -1048,6 +1029,21 @@ def run_check(dst: Path, eld: Optional[str] = None, build_dir: Optional[Path] = 
             continue
         if e.get("output") and not e.get("elf"):
             res.problems.append(f"output is not a valid ELF: {e['output']}")
+            continue
+        with open_elf(e["output"]) as elf:
+            found = validate(elf) if elf else []
+        if found:
+            e["validation"] = [f.as_dict() for f in found]
+        for f in found:
+            (res.problems if f.level == "error" else res.warnings).append(
+                f"{e['output']}: {'malformed ELF: ' if f.level == 'error' else ''}{f.message}")
+    if compare:
+        if rc == 0 and invs:
+            _compare_with_reference(res, report, dst, build_dir, system, jobs, extra_cmake or [],
+                                    build_args or [], pre_build or [], timeout, stream, runner,
+                                    reference_dir, log)
+        else:
+            res.warnings.append("--compare: skipped, the eld build did not link anything to compare")
     if res.unknown_flags:
         (res.warnings if rc == 0 else res.problems).append(
             "flags not listed by `ld.eld --help`: " + " ".join(res.unknown_flags))
