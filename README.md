@@ -144,13 +144,19 @@ An option counts as accepted if eld takes it for any target, unless you name the
    the default, ignores named version nodes; `--allow-ignored-version-scripts` makes it a warning);
 8. every output is a well-formed image: headers and tables inside the file, loadable segments
    aligned and not overlapping, the entry point in an executable segment, every allocated section
-   loaded (writable+executable segments and executable stacks are warnings).
+   loaded (writable+executable segments, executable stacks and a missing `PT_GNU_STACK` are warnings).
 
-With `--compare`, `check` also builds the original tree with its original linker, in a copy next to
-the converted one, and reports how each eld output differs from its counterpart there: interpreter,
-SONAME, needed libraries, exported symbols and their versions, RELRO / BIND_NOW / PIE / stack,
-sections, global symbols and size. Lost exports and lost hardening fail the check; the rest are
-warnings. `eldconv compare REF OUT` does the same for two files you built yourself.
+`check` then builds the original tree with its original linker, in a copy next to the converted one,
+and reports how each eld output differs from its counterpart there: interpreter, SONAME, needed
+libraries, exported symbols and their versions, RELRO / BIND_NOW / PIE / stack, sections, global
+symbols and size, and the layout: segments and their permissions, which sections each one loads,
+alignment, and, for a link placed by a linker script, base address, section order, load addresses
+and the symbols that mark section edges. Lost exports, lost hardening and a broken layout fail the
+check; the rest are warnings. `--no-compare` skips this; `--compare` makes it required.
+`eldconv compare REF OUT` does the same for two files you built yourself.
+
+The result is printed as a report and saved as `eldconv-check.md` (with both layouts side by side)
+and `eldconv-check.json` in the build directory.
 
 Configure-time probe links (CMake `try_compile`, autoconf `conftest`, Meson sanity checks, kbuild
 `ld-option`) are recognised and not judged as outputs.
@@ -161,6 +167,10 @@ Configure-time probe links (CMake `try_compile`, autoconf `conftest`, Meson sani
   plugin (eldconv forces fat LTO objects; Clang LTO works). Older eld builds also lack an i386
   backend; recent ones link `-m elf_i386`, but an x86 kernel's final `vmlinux` link still stops on
   an eld program-header error, so use arm64, arm or riscv kernels.
+- **eld writes no `PT_GNU_STACK` unless the link says `-z noexecstack`**: it does not read the
+  inputs' `.note.GNU-stack` sections as GNU ld does. The dynamic loader then assumes an executable
+  stack, and glibc 2.41 and later refuse to `dlopen` such a library. `check` reports it (an error when
+  the original build has a non-executable stack); add `-Wl,-z,noexecstack` to the project's link flags.
 - **eld on x86_64 emits no copy relocations**: a dynamic executable that uses shared-library
   data (`stdout`, `environ`, C++ vtables) links and then segfaults. `check` fails such binaries on
   purpose; `--allow-unresolved-data` downgrades that to a warning so the conversion itself can still

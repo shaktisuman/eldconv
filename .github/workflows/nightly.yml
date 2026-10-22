@@ -231,7 +231,8 @@ jobs:
         # configure.sh: tinyconfig plus what the boot needs. `check` cleans, then builds Image, whose
         # dependencies include vmlinux and the vDSO, and fails if any link bypassed eld or left a
         # malformed image. --compare also builds the unconverted tree with GNU ld and reports how
-        # eld's vmlinux and vDSO differ from that build's.
+        # eld's vmlinux and vDSO differ from that build's, layout included (a failure to build it
+        # fails the job; without --compare it would only be a warning).
         run: |
           eldconv check "$RUNNER_TEMP/linux-eld" --eld "$ELD" --jobs "$(nproc)" --timeout 7200 \
             --pre-build "$GITHUB_WORKSPACE/ci/kernel/configure.sh" \
@@ -247,6 +248,7 @@ jobs:
         run: |
           cp "$RUNNER_TEMP/linux-eld/eldconv-report.md" . 2>/dev/null || true
           cp "$RUNNER_TEMP/linux-eld/build-eld/eldconv-check.json" . 2>/dev/null || true
+          cp "$RUNNER_TEMP/linux-eld/build-eld/eldconv-check.md" . 2>/dev/null || true
           cp "$RUNNER_TEMP/linux-eld/build-eld/eldconv-build.log" . 2>/dev/null || true
           cp "$RUNNER_TEMP/linux-eld.reference/build-eld/eldconv-reference-build.log" . 2>/dev/null || true
           cp "$RUNNER_TEMP/linux-eld/.config" kernel.config 2>/dev/null || true
@@ -254,7 +256,7 @@ jobs:
           {
             echo "### kernel \`$KERNEL_REF\` on arm64"
             grep -a -m1 '^Linux version' boot.log 2>/dev/null || echo "no boot log"
-            python3 ci/kernel/summarize.py eldconv-check.json 2>/dev/null || true
+            cat eldconv-check.md 2>/dev/null || true
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
@@ -263,6 +265,7 @@ jobs:
           path: |
             eldconv-report.md
             eldconv-check.json
+            eldconv-check.md
             eldconv-build.log
             eldconv-reference-build.log
             check.txt

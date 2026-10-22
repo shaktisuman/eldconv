@@ -262,12 +262,19 @@ Diagnostics go to stderr, the converted flags to stdout.
 | `--no-probe` | skip validating flags against `ld.eld --help` |
 | `--allow-unresolved-data` | report binaries with undefined data symbols and no relocation as warnings instead of failures |
 | `--allow-ignored-version-scripts` | report version scripts eld skipped as warnings instead of failures |
-| `--compare` | also build the original tree with its own linker and report how each eld output differs (below) |
-| `--reference-dir DIR` | where `--compare` builds the original (default: `DST.reference`); an existing directory is only replaced if `--compare` made it |
+| `--compare` | require the comparison with the original build (below): fail if the original tree cannot be built. Without it, `check` compares whenever it can and only warns when it cannot |
+| `--no-compare` | do not build the original tree for comparison |
+| `--reference-dir DIR` | where the original is built (default: `DST.reference`); an existing directory is only replaced if eldconv made it |
+| `--json` | print the result as JSON instead of the report |
 | `--timeout S` | per-command timeout; it stops the whole build, not only its top command |
 | `-j N` | parallel jobs (default: the number of CPUs) |
 
-Results are printed as JSON and saved to `<build dir>/eldconv-check.json`. Every command's full
+The result is printed as a report: one line per output (is it a valid image, how does it compare
+with the original build), then each output's errors and warnings, the other problems, and where the
+full reports are. Informational differences are counted, and listed with `-v`. The same result is
+saved twice in the build directory: `eldconv-check.md`, a Markdown report with every finding and,
+per compared output, its segments and sections next to the original build's; and
+`eldconv-check.json` (printed instead of the report with `--json`). Every command's full
 output is in `<build dir>/eldconv-build.log` (printed as it arrives with `-v`; the JSON keeps only
 the last 4000 characters). The shim log is `<build dir>/eld-link.log`, with copies of the response
 files the links used in `<build dir>/eld-link.log.rsp/` (the compiler deletes its own); `check`
@@ -279,14 +286,21 @@ section inside a loaded segment, a `PT_INTERP` path and a dynamic string table w
 needed, symbols that point at real sections. A failure means a broken image whatever linked it.
 Writable+executable segments, an executable stack and text relocations are warnings.
 
-**`--compare`.** The original tree (the `source` recorded in `eldconv-report.json`) is copied to
-`DST.reference` and built there with its own linker: the same `--pre-build` commands and
-`--build-arg`s, without the shim. Each eld output is then compared with the file of the same path
-in that build:
+**Comparison with the original build.** Unless `--no-compare` is given, the original tree (the
+`source` recorded in `eldconv-report.json`) is copied to `DST.reference` and built there with its own
+linker: the same `--pre-build` commands and `--build-arg`s, without the shim. Each eld output is then
+compared with the file of the same path in that build. If the source tree is gone or does not build
+with its own linker, the comparison is skipped with a warning (an error with `--compare`). A link
+that uses a linker script (`-T`, `-Ttext`, ...) is held to the original's layout as well:
 
 | difference | level |
 |---|---|
 | ELF class, machine or type; `PT_INTERP`; `DT_SONAME` | error |
+| no `PT_GNU_STACK` where the original has a non-executable stack (the loader then assumes an executable one; glibc 2.41+ refuses to `dlopen` it) | error |
+| a section loaded read-only that the original loads writable, or without execute permission where the original executes it | error |
+| `PT_TLS` or `PT_ARM_EXIDX` missing | error |
+| linker script: another base address or physical (load) address; a section-edge symbol (`__bss_start`, `__start_foo`) no longer at that edge | error |
+| a `*_start`/`*_end` or `__start_X`/`__stop_X` range that is empty but holds data in the original | error |
 | a library no longer needed (`DT_NEEDED`) | error |
 | a symbol no longer exported, or exported with another version | error |
 | RELRO, BIND_NOW or PIE lost; an executable stack gained | error |
@@ -294,16 +308,26 @@ in that build:
 | `RUNPATH`; text relocations; build-id; entry symbol | warning |
 | an allocated section or global symbol missing | warning |
 | more than 10% (and 64 KiB) larger or smaller | warning |
-| sections and symbols linkers make up for themselves; size | info |
+| read-only data mapped executable with the code (no `-z separate-code`); a section writable that the original loads read-only; a section outside `PT_GNU_RELRO` that the original covers | warning |
+| `PT_GNU_EH_FRAME` or `PT_GNU_PROPERTY` missing; `PT_LOAD` aligned to smaller pages than the original | warning |
+| linker script: sections in another order | warning |
+| sections and symbols linkers make up for themselves; size; another set of `PT_LOAD` segments; sections in another order or at other addresses; sections more than 10% larger or smaller | info |
 
 Errors fail the check, warnings are listed, and every difference is recorded per output in
-`eldconv-check.json` (`differences`, next to `reference`). The reference build's output is in
+`eldconv-check.json` (`differences` and `layout`, next to `reference`) and in `eldconv-check.md`. The reference build's output is in
 `DST.reference/<build dir>/eldconv-reference-build.log`.
 
 ### `eldconv compare REF OUT`
 
-Validates `OUT` and compares it with `REF` as `check --compare` does, for two files you built
-yourself (say `ld.bfd`'s and eld's link of the same objects). Prints JSON; exit 1 if any error.
+Validates `OUT` and compares it with `REF` as `check` does, for two files you built yourself (say
+`ld.bfd`'s and eld's link of the same objects). Prints the findings and the two files' segments side
+by side; exit 1 if any error.
+
+| option | meaning |
+|---|---|
+| `--script` | the image is placed by a linker script: hold base address, order, load addresses and section-edge symbols to `REF`'s |
+| `--report FILE` | also write the comparison, with both layouts, as Markdown |
+| `--json` | print JSON (findings and both layouts) instead |
 
 ### `eldconv flags "FLAGS"`
 

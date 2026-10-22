@@ -59,7 +59,11 @@ detect  ->  convert (flags + build files)  ->  generate (new dir)  ->  check (bu
    `try_compile` links are recognised and not judged); every output is a valid ELF; eld reported
    no ignored option; no binary in the tree was linked by another linker (ELF `.comment`,
    build-id); no executable has undefined data symbols without a relocation; eld skipped no
-   version script. Writes `eldconv-check.json` into the build directory.
+   version script. Every output is validated as an image (`elfcheck.validate`), then, unless
+   `--no-compare`, compared with the same file from a build of the original tree with its own
+   linker (`elfcheck.compare`, and `layout.compare_layout` for segments, permissions, alignment
+   and, for linker-script links, placement). `report.py` renders the result for the console and as
+   `eldconv-check.md`; `eldconv-check.json` holds the same data.
 
 ## LTO
 

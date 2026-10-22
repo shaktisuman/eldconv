@@ -191,7 +191,7 @@ def test_compare_command(lib_sources, capsys):
     b = _cc(lib_sources, "b.so", "-shared", "-fPIC", "foo.c", "-Wl,-z,lazy")
     assert main(["compare", str(a), str(a)]) == 0
     capsys.readouterr()
-    assert main(["compare", str(a), str(b)]) == 1
+    assert main(["compare", str(a), str(b), "--json"]) == 1
     out = json.loads(capsys.readouterr().out)
     assert any(f["what"] == "bind-now" and f["check"] == "compare" for f in out["findings"])
     assert main(["compare", str(a), str(lib_sources / "foo.c")]) == 2
